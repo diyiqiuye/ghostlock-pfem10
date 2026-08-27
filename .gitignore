@@ -1,6 +1,6 @@
 # build artifacts
 /exploit
-/model
+/model_check
 *.o
 *.exe
 

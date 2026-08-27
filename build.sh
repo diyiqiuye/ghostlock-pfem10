@@ -26,13 +26,13 @@ if [ ! -x "$CC" ]; then
 fi
 
 # device exploit (single self-contained binary; payload.c / kernelsnitch are #included)
-"$CC" -D__ARM=1 -O1 -Wall -Wextra -pthread -o exploit exploit.c
+"$CC" -D__ARM=1 -O1 -Wall -Wextra -pthread -o exploit src/exploit.c
 echo "built: $(pwd)/exploit  (-O1 android26, PFEM10 delta=0 calibration)"
 
 # host-side rtmutex chain-walk model (optional, no NDK needed)
 if command -v gcc >/dev/null 2>&1; then
-    if gcc -O2 -Wall -Wextra -o model model.c 2>/dev/null; then
-        echo "built: $(pwd)/model  (host verification, run scenarios via argv)"
+    if gcc -O2 -Wall -Wextra -o model_check model/model.c 2>/dev/null; then
+        echo "built: $(pwd)/model_check  (host verification, run scenarios via argv)"
     else
         echo "note: host model build failed (gcc), skipping" >&2
     fi

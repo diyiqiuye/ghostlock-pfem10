@@ -36,7 +36,7 @@
 #include <sys/wait.h>
 
 #include "payload.h"
-#include "kernelsnitch.h"
+#include "../lib/kernelsnitch.h"
 
 /* ------------------------- 运行时环境覆盖 ------------------------- */
 static int64_t  g_skb_data_delta = PFEM10_PAYLOAD_SKB_DATA_DELTA_DEFAULT;
