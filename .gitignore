@@ -1,0 +1,9 @@
+# build artifacts
+/exploit
+/model
+*.o
+*.exe
+
+# device logs / evidence
+*.log
+ghostlock_evidence.txt
