@@ -79,12 +79,20 @@ later run's state is not attributed. See [`evidence/notes.md`](evidence/notes.md
 ## Exploit Flow
 
 ```
-LT#2        perf leak target task_struct → file
-W7 stage 1  task+0x778 = init_cred alias        → "Uid=root"
-W7 stage 2  task+0x780 = init_cred alias
-W7 stage 3  zero-write init_cred+8
-exec        memfd_exec("ksud late-load")        → kernelsu ... Live
+LT          perf leak target task_struct → file
+W7 stage 1  task+0x778 = cred_page  (real_cred → private sprayed cred)
+W7 stage 2  task+0x780 = cred_page  (cred)
+W7 stage 3  cred_page+8 = 0         (LOCAL repair, second process, ZERO shape)
+LT child    fexecve(memfd of loader) — no execve of a /data path
+loader      ksud late-load                  → kernelsu ... Live
 ```
+
+The cred page is built by `payload.c`: all eight id fields zero, all five
+capability sets full, and `user` / `user_ns` / `group_info` pointed at
+`root_user` / `init_user_ns` / `init_groups`. It is **never** the global
+`init_cred` — see "The write primitive, and its side effect" below for why that
+matters, and note that stage 3 exists because the write's side effect always
+clobbers `cred+8` (`gid`/`suid`) of whatever cred it installs.
 
 perf leak: `PERF_TYPE_SOFTWARE` / `PERF_COUNT_SW_CPU_CLOCK`, `PERF_SAMPLE_REGS_INTR`, `exclude_user=1`.
 Accept `[0xffffff8400000000, 0xffffff90000000)`, votes ≥ 15%.
@@ -111,8 +119,8 @@ address the side effect lands at.
 writes to* (at `+8`). Point it at a global kernel object and you corrupt that
 object.
 
-**W7 does exactly this, and it is visible in the readback.** From
-`out/t5_w7_778.txt`:
+**W7 used to do exactly this** — aiming `write_value` at the `init_cred` alias —
+and it is visible in the readback. From `out/t5_w7_778.txt`:
 
 ```
 shape shift=0 wps=5: in[0]=0xffffff802a7e0be0 (write_value) in[2]=0xffffff8800cdd178 (write_target)
@@ -120,20 +128,22 @@ W7[W7] write_target= 0xffffff8800cdd178
 Uid:	0	0	4294967176	0
 ```
 
-`write_value` is the `init_cred` alias, and `write_target` is `child_task+0x778`.
-`init_cred+8` is `gid`/`suid`, so the side effect stores `0xffffff8800cdd178`
+`write_value` was the `init_cred` alias and `write_target` was `child_task+0x778`.
+`init_cred+8` is `gid`/`suid`, so the side effect stored `0xffffff8800cdd178`
 there: `init_cred.gid = 0x00cdd178` and **`init_cred.suid = 0xffffff88 =
 4294967176`** — precisely the third field of the `Uid:` line above. Zeroing
-`init_cred+8` repairs it (`out/t5_repair.txt`: `Uid: 0 0 4294967176 0` →
+`init_cred+8` repaired it (`out/t5_repair.txt`: `Uid: 0 0 4294967176 0` →
 `Uid: 0 0 0 0`), which is all that "W7 stage 3" ever was.
 
-`init_cred` is shared by every kernel thread. **Do not point a task's
-`cred`/`real_cred` at `init_cred`, and do not use it as a long-lived
-credential.** Put the fake cred in a sprayed page and keep `write_value` inside
-that page, so the side effect lands at `write_value+8` in the same page and is
-harmless — which is what the W1 and W3 passes already do
-(`write_value = base + 0x100`, side effect → `base + 0x108`). The cred page then
-has to be filled in properly, `group_info` included.
+**This path is now refused in code.** `V12_W7_INIT_CRED=1` aborts with an
+explanation unless `V12_ALLOW_INIT_CRED=1` is also set, and the W2/W6/LTC paths
+no longer fall back to `init_cred` when the private cred page is missing — they
+abort instead. The default, and the only sane path, is the sprayed cred page.
+
+The side effect itself cannot be avoided: `write_value` must *be* the cred
+pointer, so `cred+8` is always clobbered with the write target. Only its
+location is a choice — and the repair is now a **local** zero of
+`cred_page+8` (stage 3), not a write into a global object.
 
 > A garbage `groups=` readout is a **separate** symptom, not this one. It was
 > seen in a run where `gid` and `egid` read back clean, so it cannot come from
@@ -153,10 +163,19 @@ can kill the calling task**.
 
 **Path 2 fires on `execve`, not on credential change, and it is a separate code
 path from path 1.** It reports through `kevent_send_to_user`, so what happens
-next is a userspace daemon's decision, not the kernel's. `d_path()` on a memfd
-is `/memfd:…`, which does not start with `/data`, so loading the payload from
-memfd is the correct way around path 2 — and a run that execs a root-owned
-binary out of `/data/local/tmp` walks straight into it.
+next is a userspace daemon's decision, not the kernel's.
+
+The check is on the path of the image **being exec'd**, so it is not enough to
+memfd-load the loader's *payload*: if the loader itself is exec'd from
+`/data/local/tmp`, that first `execve` already reports. `d_path()` on a memfd is
+`/memfd:…`, so **the loader must itself be exec'd through a memfd** —
+`V12_EXEC_MEMFD` is now on by default for exactly this reason. The old behaviour
+is visible in RUN 4:
+
+```
+LT child exec /data/local/tmp/glx12 (4 args)     <- execve of a /data path while uid=0
+LT child memfd loaded 5014624 bytes (fd=5)       <- memfd only protected the second image
+```
 
 Greppable markers for path 2:
 

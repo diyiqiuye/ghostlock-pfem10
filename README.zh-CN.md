@@ -76,12 +76,18 @@ GhostLock（CVE-2026-43499）针对 ColorOS 16 上 OPPO Find X5 Pro 的移植。
 ## 利用链
 
 ```
-LT#2        perf 泄漏目标 task_struct → 落文件
-W7 阶段 1   task+0x778 = init_cred 别名        → "Uid=root"
-W7 阶段 2   task+0x780 = init_cred 别名
-W7 阶段 3   零写 init_cred+8
-exec        memfd_exec("ksud late-load")       → kernelsu ... Live
+LT          perf 泄漏目标 task_struct → 落文件
+W7 阶段 1   task+0x778 = cred_page（real_cred → 喷页内的私有 cred）
+W7 阶段 2   task+0x780 = cred_page（cred）
+W7 阶段 3   cred_page+8 = 0（**局部**修复，第二个进程，ZERO 形状）
+LT 子进程   fexecve(loader 的 memfd) —— 不对 /data 路径做 execve
+loader      ksud late-load                    → kernelsu ... Live
 ```
+
+cred 页由 `payload.c` 构造：8 个 id 字段全 0、5 组 caps 全满，`user` / `user_ns` /
+`group_info` 指向 `root_user` / `init_user_ns` / `init_groups`。**它从来不是全局
+`init_cred`** —— 原因见下面「写原语及其副作用」，而阶段 3 之所以存在，是因为写的副作用
+**必然**把它装入的那张 cred 的 `+8`（`gid`/`suid`）打坏。
 
 perf 泄漏：`PERF_TYPE_SOFTWARE` / `PERF_COUNT_SW_CPU_CLOCK`，`PERF_SAMPLE_REGS_INTR`，`exclude_user=1`。
 取值范围 `[0xffffff8400000000, 0xffffff90000000)`，票数 ≥ 15%。
@@ -104,7 +110,8 @@ perf 泄漏：`PERF_TYPE_SOFTWARE` / `PERF_COUNT_SW_CPU_CLOCK`，`PERF_SAMPLE_RE
 `write_value` 既是**被写入的值**，也是**副作用写入的地址**（`+8`）。把它指向内核全局对象，
 就会把那对象写坏。
 
-**W7 就是这么干的，而且回读里看得见。** 来自 `out/t5_w7_778.txt`：
+**W7 以前就是这么干的** —— 把 `write_value` 指向 `init_cred` 别名 —— 回读里看得见。
+来自 `out/t5_w7_778.txt`：
 
 ```
 shape shift=0 wps=5: in[0]=0xffffff802a7e0be0 (write_value) in[2]=0xffffff8800cdd178 (write_target)
@@ -112,17 +119,19 @@ W7[W7] write_target= 0xffffff8800cdd178
 Uid:	0	0	4294967176	0
 ```
 
-`write_value` 是 `init_cred` 别名，`write_target` 是 `child_task+0x778`。
+当时 `write_value` 是 `init_cred` 别名，`write_target` 是 `child_task+0x778`。
 `init_cred+8` 是 `gid`/`suid`，于是副作用把 `0xffffff8800cdd178` 写在那儿：
 `init_cred.gid = 0x00cdd178`，而 **`init_cred.suid = 0xffffff88 = 4294967176`** ——
 正好就是上面 `Uid:` 行的第 3 个字段。把 `init_cred+8` 清零即可修复
 （`out/t5_repair.txt`：`Uid: 0 0 4294967176 0` → `Uid: 0 0 0 0`）—— 这就是"W7 阶段 3"的全部含义。
 
-`init_cred` 被**所有内核线程共用**。**不要把任务的 `cred`/`real_cred` 指向 `init_cred`，
-也不要拿它当长期凭据。** 假 cred 应放在喷页里，并让 `write_value` 落在同一页内，
-使副作用写到 `write_value+8`（同页内）而无害 —— W1 / W3 两趟已经是这么做的
-（`write_value = base + 0x100`，副作用 → `base + 0x108`）。之后再把那张 cred 页逐字段填对，
-包括 `group_info`。
+**这条路径现在被代码拒绝。** `V12_W7_INIT_CRED=1` 会直接中止并说明原因，除非同时显式
+`V12_ALLOW_INIT_CRED=1`；W2 / W6 / LTC 三条路径在私有 cred 页缺失时**不再回落到 `init_cred`**，
+而是中止。默认（也是唯一合理的）路径就是喷页内的 cred 副本。
+
+副作用本身躲不掉：`write_value` 必须**就是**那个 cred 指针，所以 `cred+8` 必然被写入
+write_target。能选的只有它的**落点** —— 而修复现在是对 `cred_page+8` 的**局部**清零
+（阶段 3），不再是写进全局对象。
 
 > `groups=` 读出垃圾是**另一个**症状，不是这个。它出现在一次 `gid`/`egid` 回读**正常**的 run 里，
 > 所以不可能来自 `init_cred+8` 副作用；它指向假 cred 自己的 `group_info` 字段。见 `evidence/notes.md` §10.6。
@@ -139,8 +148,16 @@ Uid:	0	0	4294967176	0
 
 **第 2 条挂在 `execve` 上、不挂在凭据变化上，和第 1 条是两条独立的代码路径。**
 它通过 `kevent_send_to_user` 上报，所以后续动作由用户态守护进程决定，不是内核决定。
-memfd 的 `d_path()` 是 `/memfd:…`，不以 `/data` 开头 —— 所以用 memfd 载入载荷是绕开第 2 条的正确做法；
-而从 `/data/local/tmp` exec 一个 root 二进制会直接踩上去。
+
+检查的是**被 exec 的那个映像**的路径，所以只把 loader 的*载荷*塞进 memfd 是不够的：
+如果 loader 本身是从 `/data/local/tmp` exec 的，那第一次 `execve` 就已经上报了。
+memfd 的 `d_path()` 是 `/memfd:…`，因此**必须让 loader 自己经 memfd exec** ——
+`V12_EXEC_MEMFD` 现在默认开启就是为了这个。旧行为在 RUN 4 里看得很清楚：
+
+```
+LT child exec /data/local/tmp/glx12 (4 args)     <- uid=0 时 execve 了 /data 路径
+LT child memfd loaded 5014624 bytes (fd=5)       <- memfd 只保护了第二张映像
+```
 
 第 2 条的可 grep 标记：
 

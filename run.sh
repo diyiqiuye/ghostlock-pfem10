@@ -9,7 +9,7 @@
 #
 # Modes and hit markers (found in the evidence file):
 #   W1  SELinux permissive            → "★ W1"
-#   W2  child cred = init_cred        → "★ W2"
+#   W2  child cred = private cred page → "★ W2"
 #   W5  caps-only cred copy (Phase 2) → "★ W5"
 #   W6  self-write (deprecated)       → "★ W6"
 #
@@ -17,6 +17,24 @@
 #   V12_CRED_UID        discriminator uid for the cred copy (e.g. 1234 / 2000)
 #   V12_CRED_VALUE_OFF  write-value offset compensation (PFEM10 needs -0x60)
 #   KSNITCH_SCAN_START  direct-map scan start (default 0xffffff8080000000)
+#   V12_EXEC_MEMFD      default ON.  Exec the LT loader through a memfd so the
+#                       execve target's d_path() is "/memfd:…" and not "/data…".
+#                       The guard checks the path of the image being exec'd, so
+#                       memfd-loading the loader's payload does nothing if the
+#                       loader itself is exec'd from /data.  V12_EXEC_MEMFD=0
+#                       restores the old plain execv().
+#   V12_NO_EXEC         experiment 8.4: after uid=0, issue NO execve at all —
+#                       just report and sleep for 120 s.  Separates "damage
+#                       comes from the credential write" from "damage comes from
+#                       exec'ing a /data path".
+#   V12_W7_REPAIR_CRED  run with V12_W7_ZERO=1 as a SECOND process to zero the
+#                       fake cred's own cred_page+8 (its gid/suid are always
+#                       clobbered by the write side effect).  This replaces the
+#                       old global "zero init_cred+8" step, which is gone.
+#   V12_ALLOW_INIT_CRED Explicitly allow the global init_cred alias as the write
+#                       value.  Refused by default: its side effect writes a
+#                       kernel pointer into init_cred+8, corrupting an object
+#                       shared by every kernel thread.
 set -u
 
 MODE=${1:-W1}

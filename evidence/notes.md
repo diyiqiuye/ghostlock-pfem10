@@ -533,11 +533,16 @@ buys per unit of effort, which is not the order they were first listed in.
 
 | # | Change | Question it answers |
 |---|---|---|
-| **9.0** | **stop pointing `cred`/`real_cred` at the `init_cred` alias** — put the fake cred in a sprayed page and keep `write_value` inside that page | does RUN 4's framework death go away? This is the only change that currently explains it, and the mechanism is measured (§11) |
-| **8.4** | do not exec ksud; after uid=0 just run `getuid`/`id` and sleep | does the damage happen at `execve` (→ the `/data*` path check) or at the credential write? |
+| **9.0** | **stop pointing `cred`/`real_cred` at the `init_cred` alias** — put the fake cred in a sprayed page and keep `write_value` inside that page | does RUN 4's framework death go away? This is the only change that currently explains it, and the mechanism is measured (§11). **Implemented in code (2026-09-18): the alias path is refused, and the repair is local to `cred_page+8`.** Needs a device run. |
+| **9.1** | **exec the LT loader through a memfd** so the `execve` target's `d_path()` is `/memfd:…` | does path 2 stop reporting? **Implemented in code: `V12_EXEC_MEMFD` now defaults on.** Needs a device run. |
+| **8.4** | do not exec ksud at all; after uid=0 just report and sleep 120 s (`V12_NO_EXEC=1`) | does the damage happen at `execve` (→ the `/data*` path check) or at the credential write? |
 | **8.1** | LT child: replace `pause()` with a pure userspace spin (no syscall while blocked) | does the kill still happen? If it survives, the descending-edge window is the whole story |
 | **8.3** | caps-only (uid stays 2000, `cap_effective = FULL`) then `finit_module` | can the module be loaded without any uid descent? **Only meaningful once the `CapEff` readout in §10.5 is explained.** |
 | 8.2 | LT child: block in an **exempt** syscall — `shutdown`/`setsockopt`/`connect`/`readahead`/`brk`, **never `sendmsg`** (§4.2) | does the exempt table really release? |
+
+9.0, 9.1 and 8.4 can all be done in the same run: make the credential change
+without touching `init_cred`, exec nothing, and watch whether the framework
+survives.
 
 9.0 and 8.4 can be done in the same run: make the credential change without
 touching `init_cred`, then only `id` + sleep, and watch whether the framework
