@@ -1,0 +1,7 @@
+=== v12 W7[W7]: task=0xffffff88d2861280 cred@0x780 = private cred page ===
+W7[W7] write_value = 0xffffff87b7368100
+W7[W7] write_target= 0xffffff802aa793c8
+probe_state    = D
+probe_done     = 1
+✗ W7[W7] miss (probe_state=D)
+W7[W7] PIN child 6066 holds the payload page 600s; writer returns now
