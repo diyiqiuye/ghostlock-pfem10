@@ -1,64 +1,95 @@
-# The trigger is the WRITE TARGET, not the chain and not the landing
+# The three cells — and the one I left out
 
-Run 12 changed exactly one thing: `EXTRA=V12_W7_MIMIC_W1=1`, which makes the W7
-pass write to the global `selinux_enforcing` instead of `task+0x778`.  Same
-binary, same chain, same victim, same CHAINWAIT=6000, same NODRAIN=1, same
-capture.
-
-```
-[w778r1] ONE shot: off=0x778 chainwait=6000ms hold=600s nodrain=1
-  W7[W7] write_value = 0xffffff87b7368100
-  W7[W7] write_target= 0xffffff802aa793c8      <- selinux_enforcing alias
-  probe_state    = D                            <- LANDED
-  probe_done     = 1
-  PIN child 6066 holds the payload page 600s
-  victim readback NOW: [Uid: 2000 2000 2000 2000]
-watch 120s: t+5s .. t+120s  services=5/5  uptime 1048 -> 1338 monotonic
-klog.host: 5037 lines, 5037 unique.  guard markers 0.  reboot markers 0.
-```
+> **Superseded in part.** An earlier revision of this file concluded "the trigger
+> is the write TARGET (task cred vs global)". That is incomplete: it compared
+> only two of three cells, and it treated run 13 as a landing (it was not
+> measurable). Both are corrected below.
 
 ## The table that matters
 
-| what was written | chain completed | write landed | reboot |
-|---|---|---|---|
-| `selinux_enforcing` (W1, CHAINWAIT=20000) | yes (`probe_state=D`, `probe_done=1`) | yes (`enforce=0`) | **no** - runs 8, 10, 11 |
-| `selinux_enforcing` (W7 pass, MIMIC_W1) | yes (`D`) | yes | **no** - run 12 |
-| `task+0x778` or `task+0x780` | yes (`D`) | yes | **YES** - run 3 (0x780), run 9 (0x780), run 10 (0x778) |
+| # | `write_target` | `write_value` | landed | reboot | evidence |
+|---|---|---|---|---|---|
+| 1 | global `selinux_enforcing` | `base+0x100` (own sprayed page) | yes | **no** | W1 rounds of runs 10, 11, 12; run 12's W7 pass with `MIMIC_W1` |
+| 2 | `task+0x778` | **`init_cred` P0 alias (permanent)** | yes | **no** | `out/t5_w7_778.txt` (09-14): the run continued through ksud late-load, `kernelsu ... Live`, manager alive 120 s |
+| 3 | `task+0x778` / `task+0x780` | **`g_cred_copy_addr` (sprayed page)** | yes | **YES** | runs 9 (`0x780`), 10 (`0x778`) |
 
-Four independent instances of "chain completed + write landed on a global -> no
-reboot", against three of "chain completed + write landed on task+0x778/0x780 ->
-reboot".  Run 11 is the only unclassified case (its 0x778 round 1 was R and
-round 2 died ~2 s after launch, so its state was never printed; a write can land
-before the state is printed, so it is consistent either way).
+**Cells 2 and 3 have the same target and the same landing. The only thing that
+differs is the identity of `write_value`.**
 
-## Ruled out, each by a specific run
+Cell 2's landing is not an assumption — the side-effect fingerprint is in the
+capture:
 
-| hypothesis | killed by |
-|---|---|
-| the slab_drain() fork storm | run 11 (NODRAIN=1, still rebooted) |
-| the chain walking to completion | W1 evidence files: chain completed at CHAINWAIT=20000 and landed, three times, no reboot; run 12 the same at 6000 |
-| the sprayed cred page being FREED while referenced | run 10 (pin child held it 7200 s, write landed, box still went down ~20 s later) |
-| the SIGKILL of a mid-protocol writer | runs 9/10/11/12 kill nothing |
-| the capture method | runs 8/9/10/11/12 all used the deduped host-side poll |
-| CHAINWAIT itself | it only ever tracked whether a write happened to land; run 9/11's 0x778 show probe_done=0, i.e. those chains did not complete either, so R meant the same thing at 4000 and 6000 |
+```
+in[0]=0xffffff802a7e0be0  (write_value = init_cred P0 alias)
+in[2]=0xffffff8800cdd178  (write_target = child_task+0x778)
+Uid:  0  0  4294967176  0     <- suid = 0xffffff88 = write_target >> 32
+```
 
-## So: pointing a live task's cred at a sprayed page is what reboots the box
+`4294967176` is exactly the high half of the write target, i.e. the side effect
+landed at `cred+8` as modelled. So the write landed, and that run did not reboot.
 
-Not the chain, not the landing, not the page's lifetime.  Mechanism still NOT
-established: the reboot is orderly (no panic, no BUG, no Call trace,
-`bootreason=reboot`) and delayed by a variable 20-95 s, which is the signature of
-kernel damage that a watchdog or hung task eventually acts on.
+⇒ **The discriminating quantity is whether the page installed as a live cred
+pointer outlives the task pointing at it** — not the target, not the landing, not
+the chain.
 
-## The measurement that would pin it down, and was lost twice
+## What killed the earlier "target" framing
 
-When a 0x778 write lands, the side effect puts `write_target` at `cred+8`, so
-`/proc/<pid>/status` must read
+**run 13's `landed = NO` was an over-read, twice.**
 
-    Uid:  0  0  <write_target >> 32>  0        and   Gid first field = <write_target & 0xffffffff>
+1. **Not enough time.** Every measurable pass in the corpus takes 35–45 s from
+   launch to evidence (run 12: 36 s twice; run 9: 37/39 s; run 10: 45 s), of which
+   8.5 s is fixed (probe delay 2.5 s + chain wait 6 s) and the rest is spray. Run
+   13 fired at 06:56:29 and was unreachable by 06:56:54 — **+25 s, shorter than
+   the shortest pass ever measured**. And unreachability is an upper bound: the
+   box was already gone at that instant. The write very likely had not happened
+   yet. **The state is `unknown`, not `NO`.**
+2. **The instrument had a constructive blind spot.** `uid.trace` reads
+   `/proc/<pid>/status`, which is **`real_cred`** (`get_task_cred()` loads
+   `task+0x778`). A `0x780` landing is invisible to it — its output is
+   byte-identical to "nothing happened". And run 13 never poked at all (its
+   second shot was fired 97 s after the box was dead).
 
-That single line validates three things at once: that the write landed, that
-`g_cred_copy_addr` really is the page the task now points at (the pin only proves
-*some* page was pinned - where the second socketpair's skb actually landed is
-never read back), and the side-effect model.  run 10 (predicted
-`0xffffff88` / `0xd0745178`) lost it to a 45 s evidence read; the runner now
-reads the victim immediately after each shot and streams `uid.trace` throughout.
+So run 13 does not refute the lifetime reading; it is simply unclassified.
+
+## Also corrected
+
+* **run 8 does not belong in cell 1.** Run 8 was `already Permissive — skipping
+  W1 entirely`, so it has no W1 round. Cell 1's `CHAINWAIT=20000` instances are
+  the W1 rounds of runs **10, 11, 12**.
+
+## A lead one `getprop` produced
+
+```
+persist.sys.oplus.total_abnormalreboot_count        : total_17_dump_0_pmic_17
+persist.sys.oplus.total_abnormalreboot_count_neras  : total_17_dump_0_pmic_17
+```
+
+OPPO's own counter classifies these as **abnormal** reboots, **17** of them,
+attributed to **`pmic`**, with **0 crash dumps**. And the four
+`persist.sys.boot.reason.history` entries are plain `reboot` with **no `,shell`
+suffix** — earlier entries in that history did carry suffixes (`reboot,shell`,
+`bootloader`, `reboot,edl`), so a shell actor is distinguishable and is not
+present here.
+
+A PMIC-attributed reset with no dump is consistent with everything else: no
+panic, no BUG, no Call trace, nothing in the capture, and an orderly-looking
+`bootreason`. **Not established** — but the counter is cheap to re-read after the
+next reboot, and if it increments then the reboots are PMIC resets and the
+mechanism is power/hardware rather than a kernel fault path.
+
+## Next shot: switch cells, not chain waits
+
+Shape A at `CHAINWAIT=4000` is a low-information cell — shape A has never
+rebooted at 20000 or 6000, and 4000 only makes the pass return early. The
+high-information cell is **cell 2**, which the code already supports:
+
+```bash
+CONTROL=1 HOLD=600 ROUNDS=1 CHAINWAIT=6000 NODRAIN=1 WATCH=180 ./run_bootA.sh
+```
+
+* lands and does not reboot within 180 s ⇒ the lifetime reading holds, and it
+  forms a perfect single-variable pair with cell 3;
+* lands and still reboots ⇒ the target slot itself is the trigger and the
+  lifetime reading is out.
+
+**Instruments first**, or it is another "landed but nobody looked".
