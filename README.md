@@ -276,7 +276,6 @@ artifacts/                guard_post_handler.s   kill chain, relocations resolve
                           guard_relocs.txt       raw .text relocation dump
                           guard_disasm.txt       guard + heap-spray detector
                           guard_exempt_table.txt 72-slot jump table, real names
-                          harden_disasm.txt      heap-spray detector (older listing)
 evidence/                 kill.log  notes.md — device captures and their limits
 Makefile  build.sh        exploit build (-O1, API 26, NDK r28c)
 run.sh                    device-side run orchestration (retry across reboots)

@@ -257,7 +257,6 @@ artifacts/                guard_post_handler.s   击杀链，重定位已填
                           guard_relocs.txt       `.text` 重定位原始 dump
                           guard_disasm.txt       guard + 堆喷探测器
                           guard_exempt_table.txt 72 槽跳转表（真 syscall 名）
-                          harden_disasm.txt      堆喷探测器（旧版清单）
 evidence/                 kill.log  notes.md —— 设备抓取及其边界
 Makefile  build.sh        exploit 构建（-O1、API 26、NDK r28c）
 run.sh                    设备侧运行编排（跨重启重试）
