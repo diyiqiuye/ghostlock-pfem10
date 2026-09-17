@@ -445,13 +445,27 @@ the 09-14 logs write `0xffffff802a7e0be0`, which is the P0 alias
 > **Poll, and stream to the host:**
 >
 > ```bash
-> # host side; the device shell emits only the delta each round
+> # preferred: a real stream.  On a reboot the last lines in this file ARE the
+> # reboot, and they are already on the host.
+> adb exec-out cat /dev/kmsg >> klog.host &
+>
+> # fallback if /dev/kmsg is not readable: poll and emit only the delta
 > adb shell 'n=0; while :; do dmesg > /data/local/tmp/_k.tmp; \
 >   c=$(wc -l < /data/local/tmp/_k.tmp); [ "$c" -lt "$n" ] && n=0; \
 >   tail -n +$((n+1)) /data/local/tmp/_k.tmp; n=$c; sleep 2; done' >> klog.host &
-> # ... run the chain ...
-> grep -aE 'ROOTCHECK|oplus_root|sys_call_number|set_id_flag|addr_limit|enforce|path@@|execve_' klog.host
 > ```
+>
+> **Look for the reboot, not for the guard.** When the machine reboots, the
+> markers that matter are:
+>
+> ```
+> sys_reboot | reboot: | Restarting system | Watchdog | watchdog | theia |
+> hung_task | softlockup | soft lockup | panic | Unable to handle | Call trace | BUG:
+> ```
+>
+> A reboot with `bootreason=reboot` and none of those lines is *not* a panic —
+> which is exactly the case in `2026-09-18-bootA/`. `[ROOTCHECK-*]` is the wrong
+> thing to grep for when the question is "who rebooted the box".
 
 `dmesg` itself is only readable once SELinux is Permissive, so the poller must be
 started *after* the run has flipped — or it can simply be re-run afterwards,
