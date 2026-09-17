@@ -71,6 +71,13 @@ say() { echo "[$(date +%H:%M:%S)] $*"; }
 detach() { timeout 15 "$ADB" -s "$SER" shell "$1" >/dev/null 2>&1 || true; }
 uid_line() { A "grep -m1 '^Uid:' /proc/$1/status 2>/dev/null" | tr -d '\r' | tr -s ' \t' ' '; }
 alive() { [ -n "$(A 'cut -d. -f1 /proc/uptime' | tr -d '\r')" ]; }
+# same boot as preflight?  If not, the run must stop: every measurement after a
+# reboot belongs to a different experiment.
+same_boot() {
+    local b
+    b=$(A 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null | tr -d '\r')
+    [ -n "$b" ] && [ "$b" = "$BOOTID" ]
+}
 svc_count() {
     local n=0 s
     for s in package power input phone wifi; do
@@ -288,6 +295,11 @@ shot_until() {   # $1=off $2=extra $3=tag $4=rounds -> 0 if the readback moved
     for r in $(seq 1 "$rounds"); do
         shot "$off" "$extra" "${tag}r$r"
         if ! alive; then say "  !! DEVICE GONE after $tag round $r"; exit 5; fi
+        if ! same_boot; then
+            say "  !! REBOOTED after $tag round $r (boot_id changed) — STOPPING."
+            say "     Everything after a reboot belongs to a different experiment."
+            exit 6
+        fi
         if [ "${SHOT_PS:-}" = "D" ]; then
             say "  [$tag] probe_state=D on round $r — the write landed"
             return 0
@@ -332,6 +344,7 @@ if [ -n "$CRED" ]; then
     say "=== step 7: ONE local repair of cred+8 (cred=0x$CRED) ==="
     shot 0x780 "V12_W7_ZERO=1 V12_W7_REPAIR_CRED=1 V12_W7_REPAIR_ADDR=$CRED" repair >/dev/null
     alive || { say "  !! DEVICE GONE after the repair shot"; exit 5; }
+    same_boot || { say "  !! REBOOTED after the repair shot"; exit 6; }
     say "  after repair: [$(uid_line "$CPID")]"
 fi
 
