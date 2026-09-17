@@ -29,6 +29,12 @@ best-documented full run (RUN 3, 2026-09-14) the KernelSU manager process was
 polled every 10 s for 120 s and **survived**, with `kernelsu` still `Live` in
 `/proc/modules` the whole time. See §2.3 and §9.
 
+**The second is measured, not inferred**: the write primitive has an unavoidable
+side effect, `*(write_value + 0x08) = write_target`, and the `W7` pass aims
+`write_value` at the global `init_cred`. The corruption is visible in a
+readback — `init_cred.suid` becomes `0xffffff88` = `4294967176`, exactly the
+third field of the `Uid:` line — and zeroing `init_cred + 8` repairs it. See §11.
+
 ---
 
 ## 1. What the kill scene does and does not contain
@@ -139,14 +145,14 @@ increasing (`5831 → 5871 → 5886`), so there was no kernel panic and no reboo
 during the run — but `system_server`'s services were unreachable, and the device
 had to be manually rebooted afterwards (`out/_post_reboot_check.txt`).
 
-> ⚠ This is an observation, not a diagnosis. Two readings are consistent with it
-> and we cannot separate them yet:
+> ⚠ This is an observation, not a diagnosis. Three readings are consistent with
+> it and we cannot separate them yet:
 > (a) the OPPO userspace daemon (the `kevent_send_to_user` receiver) killed the
->     framework in response to a report, or
-> (b) the credential write damaged system-wide state — the fake cred produced
->     `groups=3078438656` (`0xB77D3780`, which is the low half of the target's
->     own task pointer) and `CapEff=0x0` in the very same runs (see §9).
-> Experiment 8.3/8.4 in §9 would separate them.
+>     framework in response to a report from path 1 or path 2,
+> (b) the credential write damaged system-wide state — see §11, where the
+>     `init_cred+8` side effect is measured, or
+> (c) the fake cred's own `group_info` is garbage (§10.6).
+> Experiment 9.0 + 8.4 in §9 would separate (b)/(c) from (a).
 
 ### 2.5 What the LT child was doing while its credentials changed
 
@@ -427,9 +433,16 @@ the 09-14 logs write `0xffffff802a7e0be0`, which is the P0 alias
 adb shell 'dmesg -w > /data/local/tmp/k 2>&1 &'
 # 2. run the chain (W1 -> WV@0x778 -> WV@0x780 -> exec), unchanged
 # 3. immediately afterwards
-adb shell "grep -aE 'ROOTCHECK|oplus_root|sys_call_number|set_id_flag|addr_limit|enforce' /data/local/tmp/k"
+adb shell "grep -aE 'ROOTCHECK|oplus_root|sys_call_number|set_id_flag|addr_limit|enforce|path@@|execve_' /data/local/tmp/k"
 adb pull /data/local/tmp/k
 ```
+
+The extra patterns matter. Path 1 prints `[ROOTCHECK-CAP-ERROR]` /
+`[ROOTCHECK-RC-ERROR]`; path 2 prints `[ROOTCHECK-EXEC-INFO]:common %s result %s`
+with `execve_report` / `execve_block`; and path 2's kevent payload carries
+`%d,path@@%s`. Grepping only `ROOTCHECK` would still catch path 2, but `path@@`
+and `execve_` distinguish it from path 1 at a glance — and telling those two
+apart is the whole point of the run.
 
 Because `dmesg` is only readable once SELinux is Permissive, the reader must be
 started as a long-running process whose permission is re-evaluated per read —
@@ -515,25 +528,35 @@ Not a blocker either way.
 
 ## 9. Experiments not yet run
 
-Each changes exactly one variable. None has been executed.
+Each changes exactly one variable. None has been executed. Ordered by what it
+buys per unit of effort, which is not the order they were first listed in.
 
 | # | Change | Question it answers |
 |---|---|---|
-| 8.1 | LT child: replace `pause()` with a pure userspace spin (no syscall while blocked) | does the kill still happen? If it survives, the descending-edge window is the whole story |
-| 8.2 | LT child: block in an **exempt** syscall — `shutdown`/`setsockopt`/`connect`, **not** `sendmsg` (§4.2) | does the exempt table really release? |
-| 8.3 | caps-only (uid stays 2000, `cap_effective = FULL`) then `finit_module` | can the module be loaded without any uid descent? |
-| 8.4 | do not exec ksud; after uid=0 just run `getuid`/`id` and sleep | does the death happen at `execve` (→ the `/data*` path check) or at the credential write? |
+| **9.0** | **stop pointing `cred`/`real_cred` at the `init_cred` alias** — put the fake cred in a sprayed page and keep `write_value` inside that page | does RUN 4's framework death go away? This is the only change that currently explains it, and the mechanism is measured (§11) |
+| **8.4** | do not exec ksud; after uid=0 just run `getuid`/`id` and sleep | does the damage happen at `execve` (→ the `/data*` path check) or at the credential write? |
+| **8.1** | LT child: replace `pause()` with a pure userspace spin (no syscall while blocked) | does the kill still happen? If it survives, the descending-edge window is the whole story |
+| **8.3** | caps-only (uid stays 2000, `cap_effective = FULL`) then `finit_module` | can the module be loaded without any uid descent? **Only meaningful once the `CapEff` readout in §10.5 is explained.** |
+| 8.2 | LT child: block in an **exempt** syscall — `shutdown`/`setsockopt`/`connect`/`readahead`/`brk`, **never `sendmsg`** (§4.2) | does the exempt table really release? |
 
-Experiment 8.4 is the one we would run first: the ksud binary is exec'd from
-`/data/local/tmp/.sysdb` / `/data/local/tmp/glx12`, and
-`oplus_exe_block_ret_handler` (`+0x744`) resolves `d_path(mm->exe_file)` on
-`execve` (221) and calls the exported `oplus_RWO_root_check` (`+0x538`) whenever
-the path starts with `/data`, `/data/local/tmp`, `/data/nativetest` or
-`/data/nativetest64`; that function reports through `kevent_send_to_user` when
-any of `uid`/`gid`/`euid`/`egid` is 0. That is a **second, independent report
-path that the runs above walk straight into**, and RUN 4's memfd step
-(`LT child memfd loaded 5014624 bytes (fd=5)`) is consistent with someone
-already working around it.
+9.0 and 8.4 can be done in the same run: make the credential change without
+touching `init_cred`, then only `id` + sleep, and watch whether the framework
+survives.
+
+8.4 matters because the ksud binary is exec'd from `/data/local/tmp/.sysdb` /
+`/data/local/tmp/glx12`, and `oplus_exe_block_ret_handler` (`+0x744`) resolves
+`d_path(mm->exe_file)` on `execve` (221) and calls the exported
+`oplus_RWO_root_check` (`+0x538`) whenever the path starts with `/data`,
+`/data/local/tmp`, `/data/nativetest` or `/data/nativetest64`; that function
+reports through `kevent_send_to_user` when any of `uid`/`gid`/`euid`/`egid` is 0.
+That is a **second, independent report path that the runs above walk straight
+into**, and RUN 4's memfd step (`LT child memfd loaded 5014624 bytes (fd=5)`) is
+consistent with someone already working around it.
+
+Blinding the watchdog (`g_boot_state`) is **no longer the first priority** — RUN 3
+survived 120 s without it (§2.3). It becomes worth doing when the goal is the
+`W1` one-byte `enforcing` write or a later `g_boot_state` write, not to rescue a
+process that was never SIGKILLed.
 
 ---
 
@@ -559,16 +582,92 @@ Recorded in place rather than deleted, so nobody re-derives them:
    `finit_module` succeeded. `init_cred.cap_effective` is `CAP_FULL_SET`, so a
    cred pointing at the `init_cred` alias should not read 0. Either the alias is
    not what we think, or the `capeff` field is being read from the wrong place.
-   This is unresolved and it matters — do not assume `CAP_SYS_MODULE` was held.
+   This is unresolved and it matters — **do not assume `CAP_SYS_MODULE` was
+   held.** Cross-check `capget()` against `/proc/<pid>/status` before building
+   anything on top of a capability assumption.
 6. **Open / unexplained**: the fake cred yields
    `groups=3078438656(root)` — `0xB77D3780`, which is the low half of the target
-   task's own pointer. That is a garbage `group_info`, i.e. the fake cred is
-   **not** internally consistent, and it is a plausible source of the
-   system-wide damage in RUN 4 (§2.4, §7).
+   task's own pointer.
+   **This is NOT the `init_cred+8` side effect.** In that run `gid` and `egid`
+   read back clean (`uid=0(root) gid=0(root) egid=0(root) groups=3078438656`),
+   so `init_cred+8` was intact; the garbage is in `group_info` only. The
+   `init_cred+8` side effect shows up as a garbage **saved-uid**, which is a
+   different field and a different run (§11). Treat these as two separate
+   defects — both are fixed by "use a properly filled sprayed page", but for two
+   different reasons.
 
 ---
 
-## 11. Boundary
+## 11. The write primitive, and its side effect (measured)
+
+Not one store but two. From the header comment of `src/core/exploit.c`, and
+consistent with `fdset_map.h`:
+
+```
+*(write_target)        = write_value      // rb_erase_cached Case 1-left
+*(write_value + 0x08)  = write_target     // side effect, unavoidable
+```
+
+`write_value` must be 8-byte aligned with bit 0 clear. Two consequences:
+
+* **`g_boot_state` cannot be set with this primitive.** The byte must become
+  `1`, its low bit is forced to `0`, and `write_value` is the same quantity as
+  the address the side effect lands at.
+* **`write_value` is also the address the side effect writes to, at `+8`.**
+  Point it at a global kernel object and that object is corrupted.
+
+### Measured instance: `init_cred`
+
+`out/t5_w7_778.txt`:
+
+```
+shape shift=0 wps=5: in[0]=0xffffff802a7e0be0 (write_value) in[2]=0xffffff8800cdd178 (write_target)
+W7[W7] write_target= 0xffffff8800cdd178
+Uid:	0	0	4294967176	0
+```
+
+`write_value = 0xffffff802a7e0be0` is the `init_cred` alias and
+`write_target = 0xffffff8800cdd178` is `child_task + 0x778`. The side effect
+therefore stores `0xffffff8800cdd178` at `init_cred + 8`, i.e. across `gid` and
+`suid`:
+
+```
+init_cred.gid  = 0x00cdd178
+init_cred.suid = 0xffffff88 = 4294967176     <-- the third field of the Uid: line
+```
+
+The match is exact, so this is a measurement and not an inference. `init_cred` is
+shared by every kernel thread, so this is a global corruption, not a local one.
+
+### And the repair, also measured
+
+`out/t5_repair.txt`:
+
+```
+--- before repair ---   Uid:	0	0	4294967176	0
+repair attempt 1        probe_state = R     Uid: 0 0 4294967176 0
+repair attempt 2        probe_state = D     Uid: 0 0 0 0
+repair attempt 3        probe_state = D     Uid: 0 0 0 0
+```
+
+The repair pass is the one that used `in[2] = 0x0 (write_target)`, i.e. it did
+not aim the primary store at all — it relied on the side effect to put `0` at
+`init_cred + 8`. That is what "W7 stage 3: zero-write `init_cred+8`" always was:
+a repair of damage the exploit itself had just caused.
+
+### What to do instead
+
+Keep `write_value` inside the sprayed page, so the side effect lands at
+`write_value + 8` in the same page. The `W1` and `W3` passes already do this
+(`write_value = base + 0x100` → side effect at `base + 0x108`, harmless); the
+`W7`/`W2` passes are the ones that point it at `init_cred`. The cred page then
+has to be filled in field by field — `uid`/`euid`/`gid`/`egid` together, plus
+`user`, `user_ns` and `group_info` — which is why §10.6's `groups=` garbage is a
+separate defect rather than a consequence of this one.
+
+---
+
+## 12. Boundary
 
 * All device facts above are verbatim captures from the researcher's own device.
   No device write was performed for this document.

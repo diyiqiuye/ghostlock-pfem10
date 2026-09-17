@@ -89,6 +89,86 @@ exec        memfd_exec("ksud late-load")        → kernelsu ... Live
 perf leak: `PERF_TYPE_SOFTWARE` / `PERF_COUNT_SW_CPU_CLOCK`, `PERF_SAMPLE_REGS_INTR`, `exclude_user=1`.
 Accept `[0xffffff8400000000, 0xffffff90000000)`, votes ≥ 15%.
 
+## The write primitive, and its side effect
+
+The UAF is driven through `rb_erase_cached` Case 1-left. That gives **two**
+stores, not one:
+
+```
+*(write_target)          = write_value      // the store you aim
+*(write_value + 0x08)    = write_target     // unavoidable side effect
+```
+
+`write_value` must be 8-byte aligned with bit 0 clear — it is either `0` or a
+valid kernel address. **This is why `g_boot_state` cannot be set with this
+primitive**: the byte you need to become `1` has its low bit forced to `0` by
+the alignment requirement, and `write_value` is the same quantity as the
+address the side effect lands at.
+
+### The side effect writes into whatever `write_value` points at
+
+`write_value` is both *the value stored* and *the address the side effect
+writes to* (at `+8`). Point it at a global kernel object and you corrupt that
+object.
+
+**W7 does exactly this, and it is visible in the readback.** From
+`out/t5_w7_778.txt`:
+
+```
+shape shift=0 wps=5: in[0]=0xffffff802a7e0be0 (write_value) in[2]=0xffffff8800cdd178 (write_target)
+W7[W7] write_target= 0xffffff8800cdd178
+Uid:	0	0	4294967176	0
+```
+
+`write_value` is the `init_cred` alias, and `write_target` is `child_task+0x778`.
+`init_cred+8` is `gid`/`suid`, so the side effect stores `0xffffff8800cdd178`
+there: `init_cred.gid = 0x00cdd178` and **`init_cred.suid = 0xffffff88 =
+4294967176`** — precisely the third field of the `Uid:` line above. Zeroing
+`init_cred+8` repairs it (`out/t5_repair.txt`: `Uid: 0 0 4294967176 0` →
+`Uid: 0 0 0 0`), which is all that "W7 stage 3" ever was.
+
+`init_cred` is shared by every kernel thread. **Do not point a task's
+`cred`/`real_cred` at `init_cred`, and do not use it as a long-lived
+credential.** Put the fake cred in a sprayed page and keep `write_value` inside
+that page, so the side effect lands at `write_value+8` in the same page and is
+harmless — which is what the W1 and W3 passes already do
+(`write_value = base + 0x100`, side effect → `base + 0x108`). The cred page then
+has to be filled in properly, `group_info` included.
+
+> A garbage `groups=` readout is a **separate** symptom, not this one. It was
+> seen in a run where `gid` and `egid` read back clean, so it cannot come from
+> the `init_cred+8` side effect; it points at the fake cred's own `group_info`
+> field. See `evidence/notes.md` §10.6.
+
+## Detection paths
+
+Three independent reporters. None is a fallback for another, and **only path 1
+can kill the calling task**.
+
+| # | Hook | Trigger | Action |
+|---|---|---|---|
+| 1 | `oplus_root_check_post_handler`, sys_exit tracepoint | some id descended, or `addr_limit == KERNEL_DS` | `oplus_root_killed` → `printk` + `do_exit(SIGKILL)`; and `oplus_root_check_succ` → `kevent_send_to_user` |
+| 2 | `oplus_exe_block_ret_handler`, sys_exit but only for `execve` (221) | `d_path(mm->exe_file)` starts with `/data`, `/data/local/tmp`, `/data/nativetest`, `/data/nativetest64` | `oplus_RWO_root_check` → `printk` + `kevent_send_to_user` (no `do_exit`) |
+| 3 | `oplus_secure_harden` kretprobes | `setsockopt` optname ∈ {41,42,48}, `setxattr`, `/proc/cpuinfo`, SELinux policy reload | `oplus_heapspray_check` → `kevent_send_to_user` |
+
+**Path 2 fires on `execve`, not on credential change, and it is a separate code
+path from path 1.** It reports through `kevent_send_to_user`, so what happens
+next is a userspace daemon's decision, not the kernel's. `d_path()` on a memfd
+is `/memfd:…`, which does not start with `/data`, so loading the payload from
+memfd is the correct way around path 2 — and a run that execs a root-owned
+binary out of `/data/local/tmp` walks straight into it.
+
+Greppable markers for path 2:
+
+```
+[ROOTCHECK-EXEC-INFO]:common %s result %s      with  "execve_report" / "execve_block"
+%d,path@@%s                                    kevent payload fragment
+```
+
+Because path 2 and path 3 report only through kevent, **"no `[ROOTCHECK-*]` in
+the kernel log" does not exclude either of them having fired.** That inference
+needs the userspace receiver, which we have not located.
+
 ## Watchdog — `oplus_security_guard.ko`
 
 `sys_enter` cache:
@@ -159,6 +239,12 @@ Report payload: `$$sys_call_number@@%d`, `$$set_id_flag@@%d`, `$$addr_limit@@%lx
 | 208 `setsockopt` | 210 `shutdown` | 213 `readahead` | 214 `brk` |
 
 Remaining 60 entries → report + kill.
+
+**Do not block a thread on `sendmsg` (211) while its credentials change.** It is
+not in the table, so the thread is reported and killed. The only syscalls that
+are safe to be blocked in for that purpose are the twelve above:
+`setregid`, `setgid`, `setreuid`, `setuid`, `setresuid`, `setresgid`,
+`connect`, `getsockname`, `setsockopt`, `shutdown`, `readahead`, `brk`.
 
 > **Correction (2026-09-18).** An earlier revision of this table labelled every
 > entry **one lower** than the real arm64 syscall number (`146` was called

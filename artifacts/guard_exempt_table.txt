@@ -1,0 +1,80 @@
+# oplus_security_guard.ko - kill-path jump table @ .rodata+0
+# 72 entries, syscall 143..214
+# target = 0x47c + int32(table[idx]); 0x48c = return (no kill), 0x4a0 = report + do_exit(SIGKILL)
+
+   nr  syscall            target    verdict
+  143  setregid           0x48c     EXEMPT (no kill)
+  144  setgid             0x48c     EXEMPT (no kill)
+  145  setreuid           0x48c     EXEMPT (no kill)
+  146  setuid             0x48c     EXEMPT (no kill)
+  147  setresuid          0x48c     EXEMPT (no kill)
+  148  getresuid          0x4a0     report+kill
+  149  setresgid          0x48c     EXEMPT (no kill)
+  150  getresgid          0x4a0     report+kill
+  151  setfsuid           0x4a0     report+kill
+  152  setfsgid           0x4a0     report+kill
+  153  times              0x4a0     report+kill
+  154  setpgid            0x4a0     report+kill
+  155  getpgid            0x4a0     report+kill
+  156  getsid             0x4a0     report+kill
+  157  setsid             0x4a0     report+kill
+  158  getgroups          0x4a0     report+kill
+  159  setgroups          0x4a0     report+kill
+  160  uname              0x4a0     report+kill
+  161  sethostname        0x4a0     report+kill
+  162  setdomainname      0x4a0     report+kill
+  163  getrlimit          0x4a0     report+kill
+  164  setrlimit          0x4a0     report+kill
+  165  getrusage          0x4a0     report+kill
+  166  umask              0x4a0     report+kill
+  167  prctl              0x4a0     report+kill
+  168  getcpu             0x4a0     report+kill
+  169  gettimeofday       0x4a0     report+kill
+  170  settimeofday       0x4a0     report+kill
+  171  adjtimex           0x4a0     report+kill
+  172  getpid             0x4a0     report+kill
+  173  getppid            0x4a0     report+kill
+  174  getuid             0x4a0     report+kill
+  175  geteuid            0x4a0     report+kill
+  176  getgid             0x4a0     report+kill
+  177  getegid            0x4a0     report+kill
+  178  gettid             0x4a0     report+kill
+  179  sysinfo            0x4a0     report+kill
+  180  mq_open            0x4a0     report+kill
+  181  mq_unlink          0x4a0     report+kill
+  182  mq_timedsend       0x4a0     report+kill
+  183  mq_timedreceive    0x4a0     report+kill
+  184  mq_notify          0x4a0     report+kill
+  185  mq_getsetattr      0x4a0     report+kill
+  186  msgget             0x4a0     report+kill
+  187  msgctl             0x4a0     report+kill
+  188  msgrcv             0x4a0     report+kill
+  189  msgsnd             0x4a0     report+kill
+  190  semget             0x4a0     report+kill
+  191  semctl             0x4a0     report+kill
+  192  semtimedop         0x4a0     report+kill
+  193  semop              0x4a0     report+kill
+  194  shmget             0x4a0     report+kill
+  195  shmctl             0x4a0     report+kill
+  196  shmat              0x4a0     report+kill
+  197  shmdt              0x4a0     report+kill
+  198  socket             0x4a0     report+kill
+  199  socketpair         0x4a0     report+kill
+  200  bind               0x4a0     report+kill
+  201  listen             0x4a0     report+kill
+  202  accept             0x4a0     report+kill
+  203  connect            0x48c     EXEMPT (no kill)
+  204  getsockname        0x48c     EXEMPT (no kill)
+  205  getpeername        0x4a0     report+kill
+  206  sendto             0x4a0     report+kill
+  207  recvfrom           0x4a0     report+kill
+  208  setsockopt         0x48c     EXEMPT (no kill)
+  209  getsockopt         0x4a0     report+kill
+  210  shutdown           0x48c     EXEMPT (no kill)
+  211  sendmsg            0x4a0     report+kill
+  212  recvmsg            0x4a0     report+kill
+  213  readahead          0x48c     EXEMPT (no kill)
+  214  brk                0x48c     EXEMPT (no kill)
+
+# EXEMPT (12): 143 144 145 146 147 149 203 204 208 210 213 214
+# 143 setregid 144 setgid 145 setreuid 146 setuid 147 setresuid 149 setresgid 203 connect 204 getsockname 208 setsockopt 210 shutdown 213 readahead 214 brk

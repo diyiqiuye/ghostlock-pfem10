@@ -86,6 +86,72 @@ exec        memfd_exec("ksud late-load")       → kernelsu ... Live
 perf 泄漏：`PERF_TYPE_SOFTWARE` / `PERF_COUNT_SW_CPU_CLOCK`，`PERF_SAMPLE_REGS_INTR`，`exclude_user=1`。
 取值范围 `[0xffffff8400000000, 0xffffff90000000)`，票数 ≥ 15%。
 
+## 写原语及其副作用
+
+本漏洞经 `rb_erase_cached` Case 1-left 触发，产生的是**两次**写、不是一次：
+
+```
+*(write_target)        = write_value      // 你要写的那一次
+*(write_value + 0x08)  = write_target     // 躲不掉的副作用
+```
+
+`write_value` 必须 8 字节对齐、bit0 = 0 —— 所以它只能是 `0` 或合法内核地址。
+**这就是 8 字节写设不了 `g_boot_state` 的原因**：你需要变成 `1` 的那个字节，
+低位被对齐要求强制成 `0`；而 `write_value` 与副作用落点是同一个量。
+
+### 副作用会写进 `write_value` 指向的对象
+
+`write_value` 既是**被写入的值**，也是**副作用写入的地址**（`+8`）。把它指向内核全局对象，
+就会把那对象写坏。
+
+**W7 就是这么干的，而且回读里看得见。** 来自 `out/t5_w7_778.txt`：
+
+```
+shape shift=0 wps=5: in[0]=0xffffff802a7e0be0 (write_value) in[2]=0xffffff8800cdd178 (write_target)
+W7[W7] write_target= 0xffffff8800cdd178
+Uid:	0	0	4294967176	0
+```
+
+`write_value` 是 `init_cred` 别名，`write_target` 是 `child_task+0x778`。
+`init_cred+8` 是 `gid`/`suid`，于是副作用把 `0xffffff8800cdd178` 写在那儿：
+`init_cred.gid = 0x00cdd178`，而 **`init_cred.suid = 0xffffff88 = 4294967176`** ——
+正好就是上面 `Uid:` 行的第 3 个字段。把 `init_cred+8` 清零即可修复
+（`out/t5_repair.txt`：`Uid: 0 0 4294967176 0` → `Uid: 0 0 0 0`）—— 这就是"W7 阶段 3"的全部含义。
+
+`init_cred` 被**所有内核线程共用**。**不要把任务的 `cred`/`real_cred` 指向 `init_cred`，
+也不要拿它当长期凭据。** 假 cred 应放在喷页里，并让 `write_value` 落在同一页内，
+使副作用写到 `write_value+8`（同页内）而无害 —— W1 / W3 两趟已经是这么做的
+（`write_value = base + 0x100`，副作用 → `base + 0x108`）。之后再把那张 cred 页逐字段填对，
+包括 `group_info`。
+
+> `groups=` 读出垃圾是**另一个**症状，不是这个。它出现在一次 `gid`/`egid` 回读**正常**的 run 里，
+> 所以不可能来自 `init_cred+8` 副作用；它指向假 cred 自己的 `group_info` 字段。见 `evidence/notes.md` §10.6。
+
+## 检测路径
+
+三条互相独立的检测链。**没有一条是另一条的兜底**，而且**只有第 1 条会杀调用任务**。
+
+| # | Hook | 触发 | 动作 |
+|---|---|---|---|
+| 1 | `oplus_root_check_post_handler`，sys_exit tracepoint | 某个 id 出现下降沿，或 `addr_limit == KERNEL_DS` | `oplus_root_killed` → `printk` + `do_exit(SIGKILL)`；同时 `oplus_root_check_succ` → `kevent_send_to_user` |
+| 2 | `oplus_exe_block_ret_handler`，sys_exit 但只处理 `execve`(221) | `d_path(mm->exe_file)` 以 `/data`、`/data/local/tmp`、`/data/nativetest`、`/data/nativetest64` 开头 | `oplus_RWO_root_check` → `printk` + `kevent_send_to_user`（**无 `do_exit`**） |
+| 3 | `oplus_secure_harden` 的 kretprobe | `setsockopt` optname ∈ {41,42,48}、`setxattr`、`/proc/cpuinfo`、SELinux 策略重载 | `oplus_heapspray_check` → `kevent_send_to_user` |
+
+**第 2 条挂在 `execve` 上、不挂在凭据变化上，和第 1 条是两条独立的代码路径。**
+它通过 `kevent_send_to_user` 上报，所以后续动作由用户态守护进程决定，不是内核决定。
+memfd 的 `d_path()` 是 `/memfd:…`，不以 `/data` 开头 —— 所以用 memfd 载入载荷是绕开第 2 条的正确做法；
+而从 `/data/local/tmp` exec 一个 root 二进制会直接踩上去。
+
+第 2 条的可 grep 标记：
+
+```
+[ROOTCHECK-EXEC-INFO]:common %s result %s      参数为  "execve_report" / "execve_block"
+%d,path@@%s                                    kevent 载荷片段
+```
+
+由于第 2、3 条只经 kevent 上报，**"内核日志里没有 `[ROOTCHECK-*]`"并不能排除它们已经触发过。**
+要排除得找到那个用户态接收方，目前还没定位到。
+
 ## 看门狗 —— `oplus_security_guard.ko`
 
 `sys_enter` 缓存：
@@ -139,6 +205,11 @@ br    x11
 | 208 `setsockopt` | 210 `shutdown` | 213 `readahead` | 214 `brk` |
 
 其余 60 项 → 上报 + 击杀。
+
+**不要把线程堵在 `sendmsg`(211) 上再改它的凭据。** 它不在表里，线程会被上报并击杀。
+这个用途下能安全阻塞的 syscall 只有上面那 12 个：
+`setregid`、`setgid`、`setreuid`、`setuid`、`setresuid`、`setresgid`、
+`connect`、`getsockname`、`setsockopt`、`shutdown`、`readahead`、`brk`。
 
 > **更正（2026-09-18）**：本表早期版本把每一项的名字都**标低了 1 号**（把 `146` 写成 `setresuid`，
 > 实际 `146` 是 `setuid`、`setresuid` 是 `147`）。**号码一直是对的，只有名字错了。**
