@@ -1,5 +1,7 @@
 # GhostLock — OPPO Find X5 Pro (PFEM10)
 
+**English** · [中文](README.zh-CN.md)
+
 GhostLock (CVE-2026-43499) port for the OPPO Find X5 Pro on ColorOS 16. Reaches a `uid=0` child process and a loaded `kernelsu.ko`; the root process is intercepted.
 
 ## Vulnerability
@@ -226,7 +228,6 @@ artifacts/                guard_disasm.txt  guard_exempt_table.txt  harden_disas
 | Project | |
 |---|---|
 | [JoinChang/ghostlock-oneplus](https://github.com/JoinChang/ghostlock-oneplus) | reference implementation; 5.10 compact waiter |
-| [issue #31](https://github.com/JoinChang/ghostlock-oneplus/issues/31) | OPPO Reno10 Pro+ (CPH2521), SM8475, 5.10.236 |
 | [NebuSec CyberMeowfia](https://github.com/NebuSec/CyberMeowfia) | original GhostLock research |
 
 ## License
