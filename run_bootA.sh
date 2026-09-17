@@ -95,12 +95,32 @@ fi
 # ---------------------------------------------------------------- 2. HOST klog
 # A real stream, not a device-side file.  If the box reboots, the last lines in
 # this file ARE the reboot, and they are already on the host.
-say "=== step 2: host-side kernel log stream (/dev/kmsg -> $KLOG) ==="
-: > "$KLOG"
-( "$ADB" -s "$SER" exec-out cat /dev/kmsg >> "$KLOG" 2>/dev/null ) &
+# /dev/kmsg is "Permission denied" on this device EVEN UNDER PERMISSIVE
+# (measured 2026-09-18: `head -c1 /dev/kmsg` -> Permission denied, while
+# `dmesg | wc -l` -> 21143).  So `adb exec-out cat /dev/kmsg` — the obvious
+# stream — does not work here, and `dmesg -w` is a no-op anyway (toybox ignores
+# -w).  The only capture that works is a POLL of `dmesg`, run from the HOST so
+# that each round's delta is already on the host disk before the next round.
+# That is what makes the last lines before a reboot survive it.
+say "=== step 2: host-side kernel log (dmesg poll -> $KLOG) ==="
+if "$ADB" -s "$SER" shell 'head -c1 /dev/kmsg' >/dev/null 2>&1; then
+    say "  /dev/kmsg readable — streaming it"
+    ( "$ADB" -s "$SER" exec-out cat /dev/kmsg >> "$KLOG" 2>/dev/null ) &
+else
+    say "  /dev/kmsg NOT readable (expected here) — polling dmesg from the host"
+    ( n=0; while :; do
+          c=$( "$ADB" -s "$SER" shell "dmesg > $DEV/_kp.txt 2>/dev/null; wc -l < $DEV/_kp.txt" 2>/dev/null | tr -d '\r' | head -1 )
+          if [ -n "${c:-}" ]; then
+              [ "$c" -lt "$n" ] && n=0
+              "$ADB" -s "$SER" shell "tail -n +$((n+1)) $DEV/_kp.txt" 2>/dev/null | tr -d '\r' >> "$KLOG"
+              n=$c
+          fi
+          sleep 2
+      done ) &
+fi
 KLOGPID=$!
-sleep 3
-say "  klog.host lines after 3s: $(wc -l < "$KLOG")"
+sleep 5
+say "  klog lines after 5s: $(wc -l < "$KLOG")"
 
 # ---------------------------------------------------------------- 3. settle
 say "=== step 3: load settle (max 15s, threshold 16) ==="
