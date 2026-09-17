@@ -78,11 +78,20 @@ svc_count() {
 # ---- kernel log: host-side poll, deduped by kernel timestamp ----------------
 start_klog() {
     [ -n "$POLLPID" ] && return 0
+    # create the file eagerly: the loop below only writes once it has data, so an
+    # empty first fetch (e.g. racing the SELinux flip) would leave the file
+    # missing and later `wc -l < "$KLOG"` would fail.  Run 10 hit exactly that.
+    : > "$KLOG" 2>/dev/null
     ( while :; do
+          miss=0
           last=$(tail -1 "$KLOG" 2>/dev/null | sed -n 's/^\[ *\([0-9][0-9.]*\)\].*/\1/p')
           [ -z "$last" ] && last=0
           t3=$( "$ADB" -s "$SER" shell "dmesg | tail -n 2000" 2>/dev/null | tr -d '\r' )
-          [ -z "$t3" ] && { sleep 5; continue; }
+          if [ -z "$t3" ]; then
+              miss=$((miss+1))
+              [ "$miss" = 3 ] && printf '### [poll] 3 consecutive empty dmesg fetches at %s\n' "$(date +%H:%M:%S)" >> "$KLOG"
+              sleep 5; continue
+          fi
           mt=$(printf '%s\n' "$t3" | tail -1 | sed -n 's/^\[ *\([0-9][0-9.]*\)\].*/\1/p')
           [ -z "$mt" ] && mt=0
           # timestamps went BACKWARDS -> the box rebooted; start a fresh capture
