@@ -11,6 +11,9 @@ out/
 *.log
 *_evidence.txt
 
+# ...but the curated evidence transcripts are tracked
+!evidence/*.log
+
 # large device dumps (keep the repo light; regenerate from your own device)
 kallsyms*.txt
 syms.txt
@@ -22,3 +25,8 @@ config.txt
 # vendor kernel modules — proprietary, never commit
 oplus_*.ko
 oplus_*.so
+
+# root-solution binaries — not redistributed, take them from upstream (NOTICE.md)
+kernelsu.ko
+ksud
+libkernelsu.so

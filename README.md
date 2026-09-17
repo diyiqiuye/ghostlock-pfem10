@@ -32,8 +32,18 @@ GhostLock (CVE-2026-43499) port for the OPPO Find X5 Pro on ColorOS 16. Reaches 
 | PI write (8-byte; value = `0` or a valid kernel address) | works |
 | `task+0x778` / `task+0x780` → `Uid=root` | works |
 | `kernelsu.ko` loaded | works |
-| Root process survives | no |
+| Root process survives | ⚠ **not established** — see below |
 | Path A (UMH / `modprobe_path`) | `STATIC_USERMODEHELPER_PATH=""` |
+
+On "root process survives": the runs in [`evidence/kill.log`](evidence/kill.log)
+reach `uid=0` and load `kernelsu.ko`, and in the run that actually polled for it
+the KernelSU manager process **survived 120 s** with `kernelsu` still `Live` in
+`/proc/modules`. In a later run the same chain left the Android framework
+services unreachable (`Can't find service: package/power/input/phone/wifi`)
+while the module was still `Live`. **No `[ROOTCHECK-*]` kernel line and no
+`$$sys_call_number@@` payload has ever been captured**, so the cause of the
+later run's state is not attributed. See [`evidence/notes.md`](evidence/notes.md)
+§2.3, §2.4 and §7.
 
 ## Offsets
 
@@ -118,6 +128,23 @@ br    x11
        bl oplus_root_killed     ; printk + do_exit(SIGKILL)
 ```
 
+**Control-flow note (matters for exploit ordering).** The four descending-edge
+comparisons branch **straight to `0x468`**, the syscall-number dispatch — they do
+**not** fall through the `addr_limit` gate. `0x454`–`0x464` is only reached when
+**no** id descended. So the dispatch is entered when *either* some id descended
+*or* `addr_limit == KERNEL_DS`; it is **not** gated by `addr_limit`.
+
+Consequences:
+
+* The killer fires on the syscall **during which** the credentials changed — the
+  one whose `sys_enter` still cached the old uid. If the task is already `uid=0`
+  when a syscall enters (`0x400` `cbz`), the hook returns and stays blind from
+  then on.
+* Therefore a credential change is survivable **without** touching the module:
+  let *another* task perform the write while the victim spins in user space, or
+  route the change through one of the 12 exempt syscalls. See
+  `delivery/外部建议评审_2026-09-18.md`.
+
 `g_boot_state` — 1 byte `.data..ro_after_init`, set at module init from `verified_bootstate` via `strstr`. `is_unlocked()` = `LDRB` + `RET`.
 
 Module VA writes fault (`CONFIG_STRICT_MODULE_RWX=y`) — use the physmap alias `0xffffff80…`.
@@ -126,12 +153,22 @@ Report payload: `$$sys_call_number@@%d`, `$$set_id_flag@@%d`, `$$addr_limit@@%lx
 
 ### Exempt syscalls — `.rodata+0`, indices 143–214
 
-| 143 `setgid` | 144 `setreuid` | 145 `setuid` | 146 `setresuid` |
+| 143 `setregid` | 144 `setgid` | 145 `setreuid` | 146 `setuid` |
 |---|---|---|---|
-| 147 `getresuid` | 149 `getresgid` | 203 `getsockname` | 204 `getpeername` |
-| 208 `getsockopt` | 210 `sendmsg` | 213 `brk` | 214 `munmap` |
+| 147 `setresuid` | 149 `setresgid` | 203 `connect` | 204 `getsockname` |
+| 208 `setsockopt` | 210 `shutdown` | 213 `readahead` | 214 `brk` |
 
 Remaining 60 entries → report + kill.
+
+> **Correction (2026-09-18).** An earlier revision of this table labelled every
+> entry **one lower** than the real arm64 syscall number (`146` was called
+> `setresuid`; it is `setuid` — `setresuid` is `147`). The numbers were always
+> right; only the names were wrong. Names are now resolved from
+> `sys_call_table` @ `0xffffffc00a13d8c0` in this device's kernel image. In
+> particular `sendmsg` (211), `munmap` (215), `getsockopt` (209) and
+> `getpeername` (205) are **not** exempt — blocking a thread in any of those
+> while its credentials change is a kill, not a pass. Regenerate with
+> `tools/gen_exempt_table.py`.
 
 ## Heap-Spray Detector — `oplus_secure_harden.ko`
 
@@ -228,17 +265,41 @@ adb shell /data/local/tmp/e
 ## Files
 
 ```
-modules/                  kernelsu.ko (KMI android12-5.10)  ksud  libkernelsu.so
 src/core/                 exploit.c  payload.c  payload.h  fdset_map.h
 src/lib/                  KernelSnitch — kernelsnitch.h  futex_hash.h  timeutils.h  utils.h
 src/devices/pfem10/       pfem10_target.h
 model/                    model.c — host-side rtmutex chain-walk model
-tools/                    kdis.py  kdis_ko.py  find_task_off.py  slide_resolve.py
-artifacts/                guard_disasm.txt  guard_exempt_table.txt  harden_disasm.txt
+tools/                    kdis.py  kdis_ko.py  kdis_ko_reloc.py  gen_guard_disasm.py
+                          gen_exempt_table.py  mod_layout.py  sct_dump.py
+                          find_task_off.py  slide_resolve.py
+artifacts/                guard_post_handler.s   kill chain, relocations resolved
+                          guard_relocs.txt       raw .text relocation dump
+                          guard_disasm.txt       guard + heap-spray detector
+                          guard_exempt_table.txt 72-slot jump table, real names
+                          harden_disasm.txt      heap-spray detector (older listing)
+evidence/                 kill.log  notes.md — device captures and their limits
 Makefile  build.sh        exploit build (-O1, API 26, NDK r28c)
 run.sh                    device-side run orchestration (retry across reboots)
 .github/workflows/        build.yml — cloud build + artifact
 ```
+
+## Evidence
+
+[`evidence/kill.log`](evidence/kill.log) — verbatim `adb shell` transcripts of four
+root runs: the full timeline, the moment the target task's uid becomes 0, the
+`kernelsu.ko` load, and the state afterwards. Read the header block first: it
+lists what the file does **not** contain and why.
+
+[`evidence/notes.md`](evidence/notes.md) — the kernel side. Module addresses and
+which `/proc` channels work in which SELinux state; the full `g_boot_state`
+derivation including the `strstr` key; the corrected exempt table; the capture
+recipe that would produce the missing kernel half; and a list of what is still
+open.
+
+[`artifacts/guard_post_handler.s`](artifacts/guard_post_handler.s) — the kill
+chain with relocations filled in. `adrp x9, #0` in the older listings is
+`.data..ro_after_init`; `bl #0x4ac` is `oplus_root_check_succ`. Regenerate with
+`tools/gen_guard_disasm.py` after pulling the vendor modules from your own device.
 
 `tools/kdis_ko.py` — RELA matched by `sh_info`; on these builds `.text` relocs live in `.rela.text.<func>`, so name-based lookup returns nothing.
 

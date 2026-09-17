@@ -32,8 +32,15 @@ GhostLock（CVE-2026-43499）针对 ColorOS 16 上 OPPO Find X5 Pro 的移植。
 | PI 写原语（8 字节；值 = `0` 或合法内核地址） | 成功 |
 | `task+0x778` / `task+0x780` → `Uid=root` | 成功 |
 | `kernelsu.ko` 载入 | 成功 |
-| root 进程存活 | 否 |
+| root 进程存活 | ⚠ **未定论** —— 见下 |
 | Path A（UMH / `modprobe_path`） | `STATIC_USERMODEHELPER_PATH=""` |
+
+关于「root 进程存活」：[`evidence/kill.log`](evidence/kill.log) 里的几次 run 都走到了 `uid=0`
+并载入了 `kernelsu.ko`；其中**真正做了轮询的那次**，KernelSU 管理器进程**存活了 120 秒**，
+`/proc/modules` 里 `kernelsu` 全程 `Live`。另一次同样链路跑完后，Android framework 的服务
+不可达（`Can't find service: package/power/input/phone/wifi`），而模块仍然 `Live`。
+**从未抓到过 `[ROOTCHECK-*]` 内核行，也从未抓到 `$$sys_call_number@@` 载荷**，
+所以后一次的状态**归因不明**。详见 [`evidence/notes.md`](evidence/notes.md) §2.3、§2.4、§7。
 
 ## 偏移
 
@@ -126,12 +133,23 @@ br    x11
 
 ### 豁免 syscall —— `.rodata+0`，索引 143–214
 
-| 143 `setgid` | 144 `setreuid` | 145 `setuid` | 146 `setresuid` |
+| 143 `setregid` | 144 `setgid` | 145 `setreuid` | 146 `setuid` |
 |---|---|---|---|
-| 147 `getresuid` | 149 `getresgid` | 203 `getsockname` | 204 `getpeername` |
-| 208 `getsockopt` | 210 `sendmsg` | 213 `brk` | 214 `munmap` |
+| 147 `setresuid` | 149 `setresgid` | 203 `connect` | 204 `getsockname` |
+| 208 `setsockopt` | 210 `shutdown` | 213 `readahead` | 214 `brk` |
 
 其余 60 项 → 上报 + 击杀。
+
+> **更正（2026-09-18）**：本表早期版本把每一项的名字都**标低了 1 号**（把 `146` 写成 `setresuid`，
+> 实际 `146` 是 `setuid`、`setresuid` 是 `147`）。**号码一直是对的，只有名字错了。**
+> 现名取自本机内核镜像 `sys_call_table` @ `0xffffffc00a13d8c0`。
+> 特别注意：`sendmsg`(211)、`munmap`(215)、`getsockopt`(209)、`getpeername`(205) **不在豁免表内** ——
+> 让线程阻塞在这几个 syscall 上再改凭据，结果是**被杀**，不是放行。
+> 用 `tools/gen_exempt_table.py` 可重新生成。
+
+**控制流要点（决定利用顺序）**：四个下降沿比较是 **`b.hi #0x468` 直接跳到分派**，
+**不经过 `0x454` 的 `addr_limit` 闸**；只有"无下降沿"才会走到那个闸。
+⇒ 进入分派的条件是「**有下降沿**」**或**「`addr_limit == KERNEL_DS`」，**不是被 `addr_limit` 门控**。
 
 ## 堆喷探测器 —— `oplus_secure_harden.ko`
 
@@ -228,19 +246,43 @@ adb shell /data/local/tmp/e
 ## 文件
 
 ```
-modules/                  kernelsu.ko (KMI android12-5.10)  ksud  libkernelsu.so
 src/core/                 exploit.c  payload.c  payload.h  fdset_map.h
 src/lib/                  KernelSnitch —— kernelsnitch.h  futex_hash.h  timeutils.h  utils.h
 src/devices/pfem10/       pfem10_target.h
 model/                    model.c —— 宿主机侧 rtmutex 链遍历模型
-tools/                    kdis.py  kdis_ko.py  find_task_off.py  slide_resolve.py
-artifacts/                guard_disasm.txt  guard_exempt_table.txt  harden_disasm.txt
+tools/                    kdis.py  kdis_ko.py  kdis_ko_reloc.py  gen_guard_disasm.py
+                          gen_exempt_table.py  mod_layout.py  sct_dump.py
+                          find_task_off.py  slide_resolve.py
+artifacts/                guard_post_handler.s   击杀链，重定位已填
+                          guard_relocs.txt       `.text` 重定位原始 dump
+                          guard_disasm.txt       guard + 堆喷探测器
+                          guard_exempt_table.txt 72 槽跳转表（真 syscall 名）
+                          harden_disasm.txt      堆喷探测器（旧版清单）
+evidence/                 kill.log  notes.md —— 设备抓取及其边界
 Makefile  build.sh        exploit 构建（-O1、API 26、NDK r28c）
 run.sh                    设备侧运行编排（跨重启重试）
 .github/workflows/        build.yml —— 云端编译 + 产物
 ```
 
+## 证据
+
+[`evidence/kill.log`](evidence/kill.log) —— 四次 root run 的 `adb shell` 原始输出：完整时间线、
+目标任务 uid 变 0 的时刻、`kernelsu.ko` 载入、以及之后的状态。**先读文件头的说明**，
+它列出了这个文件**没有**什么、以及为什么。
+
+[`evidence/notes.md`](evidence/notes.md) —— 内核侧：模块地址与各 `/proc` 通道在哪种 SELinux
+状态下可用；`g_boot_state` 的完整推导（含 `strstr` 关键字）；更正后的豁免表；能补齐
+缺失的那半张击杀现场所需的抓取配方；以及仍未定论的清单。
+
+[`artifacts/guard_post_handler.s`](artifacts/guard_post_handler.s) —— 重定位已填的击杀链。
+旧清单里的 `adrp x9, #0` 其实是 `.data..ro_after_init`，`bl #0x4ac` 是 `oplus_root_check_succ`。
+从自己的设备 pull 出厂商模块后，用 `tools/gen_guard_disasm.py` 可重新生成。
+
 `tools/kdis_ko.py` —— RELA 按 `sh_info` 匹配；这些 build 的 `.text` 重定位在 `.rela.text.<func>` 里，按名字查会返回空。
+`tools/kdis_ko_reloc.py` 更进一步，**连 section 符号也解析** —— 本 build 里看门狗各 handler 的重定位
+几乎全部指向 section 符号，而 section 符号在 `.strtab` 里没有名字，只能靠 `st_shndx` 认身份。
+这正是让 `g_boot_state`（`.data..ro_after_init` 里唯一那 1 字节）从「无法解析的 `adrp x9, #0`」
+变成可见重定位目标的关键。
 
 ## 相关
 
