@@ -230,10 +230,13 @@ adb shell /data/local/tmp/e
 ```
 modules/                  kernelsu.ko (KMI android12-5.10)  ksud  libkernelsu.so
 src/core/                 exploit.c  payload.c  payload.h  fdset_map.h
+src/lib/                  KernelSnitch —— kernelsnitch.h  futex_hash.h  timeutils.h  utils.h
 src/devices/pfem10/       pfem10_target.h
+model/                    model.c —— 宿主机侧 rtmutex 链遍历模型
 tools/                    kdis.py  kdis_ko.py  find_task_off.py  slide_resolve.py
 artifacts/                guard_disasm.txt  guard_exempt_table.txt  harden_disasm.txt
 Makefile  build.sh        exploit 构建（-O1、API 26、NDK r28c）
+run.sh                    设备侧运行编排（跨重启重试）
 .github/workflows/        build.yml —— 云端编译 + 产物
 ```
 

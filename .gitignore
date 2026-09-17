@@ -3,6 +3,7 @@
 a.out
 /ghostlock
 /exploit_guard
+/model_check
 
 # local run output
 logs/

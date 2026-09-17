@@ -230,10 +230,13 @@ adb shell /data/local/tmp/e
 ```
 modules/                  kernelsu.ko (KMI android12-5.10)  ksud  libkernelsu.so
 src/core/                 exploit.c  payload.c  payload.h  fdset_map.h
+src/lib/                  KernelSnitch — kernelsnitch.h  futex_hash.h  timeutils.h  utils.h
 src/devices/pfem10/       pfem10_target.h
+model/                    model.c — host-side rtmutex chain-walk model
 tools/                    kdis.py  kdis_ko.py  find_task_off.py  slide_resolve.py
 artifacts/                guard_disasm.txt  guard_exempt_table.txt  harden_disasm.txt
 Makefile  build.sh        exploit build (-O1, API 26, NDK r28c)
+run.sh                    device-side run orchestration (retry across reboots)
 .github/workflows/        build.yml — cloud build + artifact
 ```
 
