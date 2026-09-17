@@ -1,0 +1,19 @@
+# build output
+*.o
+a.out
+/ghostlock
+/exploit_guard
+
+# local run output
+logs/
+out/
+*.log
+*_evidence.txt
+
+# large device dumps (keep the repo light; regenerate from your own device)
+kallsyms*.txt
+syms.txt
+kernel_payload.bin
+config.txt
+*.img
+*.mbn

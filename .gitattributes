@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.ko binary
+*.so binary
+ksud binary
+*.png binary
+*.jpg binary
