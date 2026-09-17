@@ -133,3 +133,65 @@ did not take — but that conclusion comes from the readback, not from the miss.
 
 Re-run with the capture streaming to the host (§3) so that a reboot still leaves
 the kernel side on the host disk. Nothing else in the plan changes.
+
+---
+
+## 8. Attempt 3 — `run7_0542.log` (2026-09-18 05:42 → 05:50): **no reboot**
+
+First run of the rewritten runner. Full sequence completed.
+
+| time | event |
+|---|---|
+| 05:43:01 | already Permissive — W1 skipped entirely |
+| 05:43:02 | host-side `dmesg` poll started (`/dev/kmsg` unreadable, see §9) |
+| 05:43:31 | LT leak **OK**: `task=0xffffff87d9382500 child_pid=9708` |
+| 05:43:34 | one shot `0x778` → Uid stayed `2000 2000 2000 2000` → recorded, not aborted |
+| 05:45:09 | **machine alive: yes** |
+| 05:45:09 | one shot `0x780` → Uid unchanged |
+| 05:46:30 | one shot local repair → Uid unchanged |
+| 05:47:59 | verdict: cred did not take |
+| 05:48:04 | poke → child reports `iter=11 uid=2000 caps=0 capeff=0x0` |
+| 05:48:05–05:49:50 | 60 s watch: `services=5/5` at every sample, uptime 2629 → 2716 monotonic |
+| 05:49:52 | kernel log: **799 212 lines**, guard markers **0**, reboot/panic markers **0** |
+
+The only `watchdog` lines anywhere in the capture are routine
+`kick-init-watchdog` / `[init_watchdog]init process is alive` heartbeats.
+
+**What this does and does not say.** It does say: three shots were fired with a
+sprayed-heap `write_value` and the machine did not reboot, and the guard did not
+report. It does **not** say "a landed sprayed-page write is safe", because **no
+write landed** — `Uid:` stayed `2000 2000 2000 2000` through all three, and the
+child's own `getuid()` was still 2000. With one shot per offset and a per-shot
+hit rate well under 1, missing is the expected outcome; the earlier successful
+`0x778` writes in this project took 3–8 rounds.
+
+**So the reboot question is still open**, but its shape has changed: runs 3 and 4
+rebooted *while also missing* (their readbacks never moved either), so the reboot
+was never correlated with a landed write. The deliberate differences in this run
+were the runner changes — no `SIGKILL`, `V12_PIN_FORK=1`, `V12_CHAIN_WAIT_MS=4000`,
+and **`V12_NODRAIN=1`, which removes the `slab_drain()` storm (5 waves × 400
+forked children, each `pause()`d then killed) from the start of every W7
+invocation**. That last one is the most load-heavy difference and therefore the
+obvious single-variable test: repeat this exact run with `V12_NODRAIN` unset.
+Two runs and one non-reboot do not establish a cause; this is a candidate.
+
+## 9. `/dev/kmsg` is unreadable here — the stream method does not work
+
+Measured with SELinux already Permissive:
+
+```
+$ head -c1 /dev/kmsg     ->  head: /dev/kmsg: Permission denied
+$ dmesg | wc -l          ->  21143
+```
+
+So `adb exec-out cat /dev/kmsg`, the natural "stream it to the host" recipe, is
+not available on this device, and `dmesg -w` is a no-op anyway (§3). The runner
+now probes `/dev/kmsg` and falls back to polling `dmesg` **from the host**, one
+adb round per 2 s, writing only the delta. Running the poll on the host is the
+point: each round's output is on host disk before the next round starts, so the
+lines before a reboot survive it — which one long-lived `adb shell` stream would
+not. §6 of `notes.md` carries the same correction.
+
+One side effect worth knowing: the poll appends the whole buffer on its first
+round, so the file is much larger than the ring buffer (73 MB / 799 k lines for a
+5-minute run). Only the extracts are committed.

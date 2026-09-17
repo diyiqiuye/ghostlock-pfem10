@@ -134,7 +134,7 @@ done
 # ---------------------------------------------------------------- 4. LT
 say "=== step 4: LT child (pure userspace spin, NO_EXEC) ==="
 TASK=""; CPID=""; PPID_LT=""
-for attempt in 1 2 3 4; do
+for attempt in $(seq 1 12); do   # the perf leak is probabilistic and currently flaky; each try is ~30s
     detach "cd $DEV && setsid nohup env V12_TASK_FILE=$TASKF V12_RESULT_FILE=$RES V12B_EVIDENCE=$DEV/bootA_lt_ev.txt V12_NO_EXEC=1 ./$(basename $BIN) LT > $DEV/bootA_lt_$TAG.log 2>&1 </dev/null &"
     for i in $(seq 1 25); do
         sleep 1

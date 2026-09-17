@@ -1,0 +1,78 @@
+[05:42:54] === preflight ===
+5.10.236-android12-9-o-gaf2075ad2c06
+Permissive
+0ad9b0c2-7817-483a-a611-bb8b0a37b1ba
+ 05:42:55 up 38 min,  0 users,  load average: 3.41, 3.66, 5.93
+3.41 3.66 5.93 1/8443 6740
+./exploit_guard: 1 file pushed, 0 skipped. 29.4 MB/s (73008 bytes in 0.002s)
+./exploit_guard: 1 file pushed, 0 skipped. 23.9 MB/s (73008 bytes in 0.003s)
+[05:42:58] === step 1: SELinux Permissive ===
+[05:43:01]   already Permissive — skipping W1 entirely (no timeout 190 ./glxA_0918_054253 W1)
+[05:43:01] === step 2: host-side kernel log (dmesg poll -> D:/Desktop/cve202643499/out/bootA_0918_054251/klog.host) ===
+[05:43:02]   /dev/kmsg NOT readable (expected here) — polling dmesg from the host
+[05:43:10]   klog lines after 5s: 21381
+[05:43:10] === step 3: load settle (max 15s, threshold 16) ===
+[05:43:12]   load1=3.31
+[05:43:14] === step 4: LT child (pure userspace spin, NO_EXEC) ===
+[05:43:31]   task=0xffffff87d9382500 child_pid=9708 lt_parent=6829
+[05:43:33]   baseline: Uid: 2000 2000 2000 2000
+[05:43:34] === step 5: ONE 0x778 shot (real_cred) ===
+[05:44:13]   polling /proc/9708/status Uid for up to 20s (async commit) ...
+[05:45:06]   after 0x778: [Uid: 2000 2000 2000 2000]
+[05:45:07]   → real_cred has not moved (yet).  Recorded as data; NOT aborting —
+[05:45:07]     the gate is 0x780 + repair, which is what getuid() reads.
+[05:45:09]   machine alive: yes
+[05:45:09] === step 6: ONE 0x780 shot (cred) ===
+[05:46:29]   after 0x780: [Uid: 2000 2000 2000 2000]
+[05:46:30] === step 7: ONE local repair of that cred's +8 ===
+[05:47:56]   after repair: [Uid: 2000 2000 2000 2000]
+[05:47:56] === verdict (gate lives here, not after 0x778) ===
+[05:47:58]   /proc/9708/status Uid: [Uid: 2000 2000 2000 2000]
+[05:47:58]   child's own report:     []
+[05:47:59]   ✗ cred did NOT take in this boot.  One shot was fired per offset,
+[05:47:59]     nothing was killed; take a fresh boot rather than adding rounds.
+[05:48:00] === step 8: poke LT parent ===
+[05:48:04]   child report: iter=11 uid=2000 caps=0 capeff=0x0 pid=9708
+[05:48:05] === step 9: watch 60s ===
+[05:48:24]   t+10s up=2629 services=5/5
+[05:48:41]   t+20s up=2647 services=5/5
+[05:48:58]   t+30s up=2664 services=5/5
+[05:49:15]   t+40s up=2681 services=5/5
+[05:49:33]   t+50s up=2699 services=5/5
+[05:49:50]   t+60s up=2716 services=5/5
+[05:49:50] === step 10: evidence ===
+[05:49:52]   klog.host: 799212 lines
+[05:49:52]   --- reboot / watchdog markers (NOT ROOTCHECK) ---
+    796635:[ 2432.769480] [T100001] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+    796636:[ 2432.770543] [T100001] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+    796847:[ 2460.671252] [T228693] [init_watchdog]init process is alive
+    797036:[ 2480.502818] [    T1] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+    797037:[ 2480.504063] [    T1] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+    797038:[ 2480.504750] [    T1] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+    797166:[ 2491.387812] [T228693] [init_watchdog]init process is alive
+    797272:[ 2500.496883] [T300001] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+    797479:[ 2522.107849] [T228693] [init_watchdog]init process is alive
+    798271:[ 2613.196474] [    T1] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+    798272:[ 2613.199881] [    T1] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+    798273:[ 2613.201888] [    T1] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+    798274:[ 2613.204168] [    T1] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+    798275:[ 2613.206171] [    T1] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+    798276:[ 2613.207860] [    T1] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+    798277:[ 2613.208979] [    T1] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+    798278:[ 2613.210070] [    T1] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+    798279:[ 2614.355314] [T228693] [init_watchdog]init process is alive
+    799013:[ 2700.255977] [T600001] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+    799014:[ 2700.256275] [T600001] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+    799015:[ 2700.256496] [T600001] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+    799016:[ 2700.256701] [T600001] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+    799017:[ 2700.256901] [T600001] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+    799018:[ 2700.257099] [T600001] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+    799117:[ 2706.435076] [T228693] [init_watchdog]init process is alive
+[05:49:54]   --- guard markers, for completeness ---
+[05:49:55]     (none)
+reboot
+Permissive
+ 05:49:56 up 45 min,  0 users,  load average: 3.92, 4.04, 5.29
+0
+[05:49:59] evidence -> D:/Desktop/cve202643499/out/bootA_0918_054251
+[05:49:59] === done ===

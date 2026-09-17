@@ -1,0 +1,21 @@
+# kernel-log extract, run 7 (2026-09-18 05:42-05:50), captured by host-side dmesg poll
+# full capture: out/bootA_0918_054251/klog.host  (799212 lines, 73M)
+
+## guard markers (ROOTCHECK / path@@ / execve_ / sys_call_number)
+count: 0
+
+## reboot / panic markers
+count (excluding routine init_watchdog heartbeats): 0
+
+## the ONLY 'watchdog' lines present are routine init heartbeats:
+[ 2700.256701] [T600001] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+[ 2700.256901] [T600001] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+[ 2700.257099] [T600001] init: processing action (kick-init-watchdog) from (/system_ext/etc/init/self_init_theia.rc:57)
+[ 2706.435076] [T228693] [init_watchdog]init process is alive
+
+## last 5 lines of the capture (uptime was still climbing)
+[ 2715.358609] [T100305] init: Unable to set property 'persist.logd.log.load.exceeding.adjustable.count': getpeercon() failed: Invalid argument
+[ 2715.359648] [T101109] logd: Log Count: 1, Total Log Count: 410, Exceeding Count: 0, Threshold: 200000
+[ 2715.744140] [ T3043] [OPLUS_CHG][oplus_usbtemp_monitor_main]==================usbtemp_volt_l[875], usb_temp_l[27], usbtemp_volt_r[876], usb_temp_r[27]
+[ 2721.026416] [T625491] SELinux: security_sid_to_context_core:  called before initial load_policy on unknown SID 2478
+[ 2721.026422] [T625491] binder: 25491:25491 transaction call to 1081:0 failed 578486/29201/-22, code 4 size 88-0 line 3334
