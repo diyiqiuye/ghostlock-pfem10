@@ -238,12 +238,8 @@ adb shell /data/local/tmp/e
 
 ```
 ghostlock-pfem10/
-├── modules/                          vendor modules + KernelSU, as pulled from the device
-│   ├── oplus_security_guard.ko       watchdog (ROOTGUARD)
-│   ├── oplus_secure_harden.ko        heap-spray detector
-│   ├── oplus_security_keventupload.ko
-│   ├── oplus_secure_common.ko
-│   ├── kernelsu.ko                   vermagic=5.10.252-dirty
+├── modules/                          KernelSU, as pulled from the device
+│   ├── kernelsu.ko                   KMI android12-5.10, vermagic=5.10.252-dirty
 │   ├── ksud
 │   └── libkernelsu.so
 ├── src/
@@ -267,6 +263,8 @@ ghostlock-pfem10/
 └── README.md
 ```
 
+The vendor modules analysed here (`oplus_security_guard.ko`, `oplus_secure_harden.ko`, `oplus_security_keventupload.ko`, `oplus_secure_common.ko`) are **not** redistributed. Pull them from your own device's `/vendor/lib/modules/` and run the commands in `NOTICE.md` to regenerate the artifacts.
+
 `tools/kdis_ko.py` matches RELA sections by `sh_info`, not by name. On these builds the `.text` relocations live in an oddly-named section (`.rela.text.<function_name>`), so a name-based lookup returns zero entries and `bl` targets appear unresolved.
 
 ## Related
@@ -278,5 +276,7 @@ ghostlock-pfem10/
 | [NebuSec CyberMeowfia](https://github.com/NebuSec/CyberMeowfia) | original GhostLock research |
 
 ## License
+
+GPL-3.0 — see [LICENSE](LICENSE).
 
 For authorized security research and educational purposes only.

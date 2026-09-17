@@ -17,3 +17,7 @@ kernel_payload.bin
 config.txt
 *.img
 *.mbn
+
+# vendor kernel modules — proprietary, never commit
+oplus_*.ko
+oplus_*.so
