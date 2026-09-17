@@ -1,0 +1,51 @@
+[05:56:35] === preflight ===
+* daemon not running; starting now at tcp:5037
+* daemon started successfully
+5.10.236-android12-9-o-gaf2075ad2c06
+Permissive
+0ad9b0c2-7817-483a-a611-bb8b0a37b1ba
+ 05:56:41 up 52 min,  0 users,  load average: 3.15, 3.42, 4.54
+3.15 3.42 4.54 1/8448 25703
+./exploit_guard: 1 file pushed, 0 skipped. 24.3 MB/s (73008 bytes in 0.003s)
+./exploit_guard: 1 file pushed, 0 skipped. 20.7 MB/s (73008 bytes in 0.003s)
+[05:56:44] === step 1: SELinux Permissive ===
+[05:56:46]   already Permissive — skipping W1 entirely
+[05:56:46] === step 2: host-side kernel log (dmesg poll, deduped by timestamp) ===
+[05:56:47]   /dev/kmsg NOT readable (expected here) — polling dmesg from the host
+[05:56:53]   klog lines after 5s: 2000
+[05:56:54] === step 3: load settle (max 15s, threshold 16) ===
+[05:56:55]   load1=3.12
+[05:56:56] === step 4: LT child (pure userspace spin, NO_EXEC) ===
+[05:58:03]   LT attempt 1 rejected: [31m[-] [0mperf task suspicious (addr=0xffffffc04e2fbeb0 votes=59/256) — reject
+[05:58:25]   task=0xffffff879e672500 child_pid=30428 lt_parent=27865
+[05:58:26]   baseline: Uid: 2000 2000 2000 2000
+[05:58:27] === step 5: 0x778 shot(s) (real_cred) ===
+[05:59:29]   [w778] round 1/1: readback unchanged
+[05:59:30]   after 0x778: [Uid: 2000 2000 2000 2000]   (recorded as data; the gate is 0x780 + repair)
+[05:59:31] === step 6: 0x780 shot(s) (cred) ===
+[06:00:31]   [w780] round 1/1: readback unchanged
+[06:00:31]   ✗ 0x780 did not move the readback — SKIPPING the repair.
+[06:00:32]     The repair only exists to clear cred+8 of the cred that was actually
+[06:00:32]     installed; with nothing installed it repairs a page nobody points at.
+[06:00:33]     (Run 7 burned 86 s on exactly that.)
+[06:00:33] === verdict ===
+[06:00:35]   /proc/30428/status Uid: [Uid: 2000 2000 2000 2000]
+[06:00:36]   child's own report:     []
+[06:00:36]   ✗ cred did not take in this boot.  Take a fresh boot; do not add rounds.
+[06:00:37] === step 8: poke LT parent ===
+[06:00:41]   child report: iter=12 uid=2000 caps=0 capeff=0x0 pid=30428
+[06:00:42] === step 9: watch 15s ===
+[06:00:54]   t+5s up=3380 services=5/5
+[06:01:05]   t+10s up=3392 services=5/5
+[06:01:17]   t+15s up=3404 services=5/5
+[06:01:17] === step 10: evidence ===
+[06:01:20]   klog.host: 4249 lines, 4249 unique
+[06:01:20]   --- reboot / watchdog markers (NOT ROOTCHECK) ---
+[06:01:21]   --- guard markers ---
+[06:01:23]     (none)
+reboot
+Permissive
+ 06:01:24 up 56 min,  0 users,  load average: 3.68, 3.78, 4.41
+0
+[06:01:26] evidence -> D:/Desktop/cve202643499/out/run8_055633
+[06:01:26] === done ===

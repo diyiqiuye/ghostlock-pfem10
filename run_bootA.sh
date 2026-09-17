@@ -107,6 +107,14 @@ say "=== preflight ==="
 "$ADB" devices | grep -q "$SER" || { echo "device $SER not attached"; exit 1; }
 A 'uname -r; getenforce; cat /proc/sys/kernel/random/boot_id; uptime; cat /proc/loadavg' \
     | tee "$OUT/00_preflight.txt" | tr -d '\r'
+# The LT parent blocks in waitpid() and its child spins, so a detached LT pair
+# OUTLIVES the runner.  Left alone they accumulate across runs and inflate the
+# load, which is what the perf leak is sensitive to.  Clear any leftovers from a
+# previous run before starting: their sequence is over, so this is not a
+# mid-protocol kill.
+say "  clearing leftover glx* from previous runs:"
+A 'for p in $(ps -A -o PID,NAME 2>/dev/null | grep -E "^ *[0-9]+ glx" | awk "{print \$1}"); do kill -9 $p 2>/dev/null; done; ps -A -o NAME 2>/dev/null | grep -c "^glx" || true' \
+    | tr -d '\r' | sed 's/^/    remaining: /'
 "$ADB" push "${BIN_LOCAL:-./exploit_guard}" "$BIN"  2>&1 | tail -1
 "$ADB" push "${BIN_LOCAL:-./exploit_guard}" "$BINW" 2>&1 | tail -1
 A "chmod 755 $BIN $BINW"
