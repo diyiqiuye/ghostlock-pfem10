@@ -55,6 +55,9 @@ CHAINWAIT=${CHAINWAIT:-6000}
 NODRAIN=${NODRAIN:-1}
 ROUNDS=${ROUNDS:-1}
 CONTROL=${CONTROL:-0}
+# WATCH: seconds to watch for a reboot after the sequence.  15 by default; widen
+# it when the hypothesis under test predicts a DELAYED reboot.
+WATCH=${WATCH:-15}
 KLOG=$OUT/klog.host
 POLLPID=""
 mkdir -p "$OUT"
@@ -296,8 +299,8 @@ for i in $(seq 1 15); do
     [ -n "$R" ] && { say "  child report: $R"; break; }
 done
 
-say "=== step 9: watch 15s ==="
-for i in 5 10 15; do
+say "=== step 9: watch ${WATCH}s ==="
+for i in $(seq 5 5 "$WATCH"); do
     sleep 5
     UP=$(A 'cut -d. -f1 /proc/uptime' | tr -d '\r')
     [ -z "$UP" ] && { say "  !! device gone at t+${i}s — REBOOT"; break; }
