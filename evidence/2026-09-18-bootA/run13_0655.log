@@ -1,0 +1,71 @@
+[06:55:41] === preflight ===
+* daemon not running; starting now at tcp:5037
+* daemon started successfully
+5.10.236-android12-9-o-gaf2075ad2c06
+Permissive
+5fe2227e-11e8-4fc1-b6f5-10fe63eb7038
+ 06:55:47 up 23 min,  0 users,  load average: 3.72, 23.35, 26.16
+3.72 23.35 26.16 1/7678 15476
+[06:55:47]   clearing leftover glx* from previous runs:
+    remaining: 0
+./exploit_guard: 1 file pushed, 0 skipped. 24.3 MB/s (73008 bytes in 0.003s)
+./exploit_guard: 1 file pushed, 0 skipped. 36.6 MB/s (73008 bytes in 0.002s)
+[06:55:49] === step 1: SELinux Permissive ===
+[06:55:51]   already Permissive — skipping W1 entirely
+[06:55:51]   W1 evidence:
+[06:55:53] === step 2: host-side kernel log (dmesg poll, deduped by timestamp) ===
+[06:55:53]   /dev/kmsg NOT readable (expected here) — polling dmesg from the host
+[06:56:00]   klog lines after 5s: 2000
+[06:56:00] === step 3: load settle (max 15s, threshold 16) ===
+[06:56:02]   load1=3.56
+[06:56:03] === step 4: LT child (pure userspace spin, NO_EXEC) ===
+[06:56:25]   task=0xffffff8805b0ca00 child_pid=17530 lt_parent=15528
+[06:56:26]   baseline: Uid: 2000 2000 2000 2000
+[06:56:27]   starting uid.trace on pid 17530
+[06:56:27] === step 5: 0x778 shot(s) (real_cred) ===
+[06:56:29]   [w778r1] ONE shot: off=0x778 chainwait=6000ms hold=600s nodrain=1 
+error: closed
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+[06:57:56]   [w778r1] shot wall-clock: 86s
+adb.exe: device '91f71075' not found
+[06:58:03]   [w778r1] victim readback NOW: []
+[06:58:05]   [w778r1] probe_state=  (D=landed, R=miss, S=blocked)
+[06:58:29]   [w778] round 1/1: readback unchanged
+[06:58:31]   after 0x778: []   (recorded as data; the gate is 0x780 + repair)
+[06:58:31] === step 6: 0x780 shot(s) (cred) ===
+[06:58:33]   [w780r1] ONE shot: off=0x780 chainwait=6000ms hold=600s nodrain=1 
+error: closed
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+[07:00:11]   [w780r1] shot wall-clock: 97s
+adb.exe: device '91f71075' not found
+[07:00:17]   [w780r1] victim readback NOW: []
+[07:00:20]   [w780r1] probe_state=  (D=landed, R=miss, S=blocked)
+adb.exe: device '91f71075' not found
+[07:00:22]   !! DEVICE GONE after w780 round 1
