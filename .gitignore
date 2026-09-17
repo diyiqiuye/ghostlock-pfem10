@@ -13,6 +13,7 @@ out/
 
 # ...but the curated evidence transcripts are tracked
 !evidence/*.log
+!evidence/**/*.log
 
 # large device dumps (keep the repo light; regenerate from your own device)
 kallsyms*.txt

@@ -1,0 +1,131 @@
+[05:00:40] === preflight ===
+* daemon not running; starting now at tcp:5037
+* daemon started successfully
+5.10.236-android12-9-o-gaf2075ad2c06
+Permissive
+496a5217-b470-4c1f-a213-5d23eebc502d
+ 05:00:47 up 11 min,  0 users,  load average: 3.51, 5.23, 4.31
+3.51 5.23 4.31 1/6875 1007
+[05:00:47] push binaries
+D:/Desktop/cve202643499/delivery/ghostlock-pfem10/exploit_guard: 1 file pushed, 0 skipped. 6.0 MB/s (72800 bytes in 0.011s)
+D:/Desktop/cve202643499/delivery/ghostlock-pfem10/exploit_guard: 1 file pushed, 0 skipped. 27.4 MB/s (72800 bytes in 0.003s)
+[05:00:48] === step 1: SELinux Permissive ===
+[05:00:50]   already Permissive (carried over in this boot) — skipping W1
+Permissive
+ 05:00:51 up 11 min,  0 users,  load average: 3.71, 5.25, 4.32
+[05:00:51] === step 2: kernel-log capture (polled; dmesg -w is a no-op here) ===
+[05:00:58]   capture lines after 5s: 20286
+[05:00:58] === step 2.5: wait for load to settle ===
+[05:01:00]   load1=3.68
+[05:01:01] === step 3: LT child (pure userspace spin, NO_EXEC) ===
+[05:01:01]   LT attempt 1
+[05:01:22]   task=0xffffff8995550000 child_pid=5350 lt_parent=1088
+[05:01:22]   baseline status:
+    Uid:	2000	2000	2000	2000
+    CapEff:	0000000000000000
+[05:01:24] === step 4: 0x778 (real_cred) ===
+[05:01:24]   [w778] off=0x778 round 1/8
+[05:02:09]   [w778] miss (probe_state) — kill + retry
+[05:02:13]   [w778] off=0x778 round 2/8
+[05:03:11]   [w778] miss (probe_state) — kill + retry
+[05:03:15]   [w778] off=0x778 round 3/8
+error: closed
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+error: closed
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+[05:09:07]   [w778] miss (probe_state) — kill + retry
+adb.exe: device '91f71075' not found
+[05:09:11]   [w778] off=0x778 round 4/8
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found

