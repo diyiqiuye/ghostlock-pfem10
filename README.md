@@ -400,6 +400,19 @@ derivation including the `strstr` key; the corrected exempt table; the capture
 recipe that would produce the missing kernel half; and a list of what is still
 open.
 
+[`evidence/2026-09-18-bootA/`](evidence/2026-09-18-bootA/README.md) — the first
+device run of the current design. Both attempts ended in an **orderly reboot**
+(`bootreason=reboot`, no panic) and **neither reached the credential write**, so
+the question it was meant to answer is still open. It also documents the
+methodology error worth knowing about: **`dmesg -w` is a no-op on this device**
+(toybox dumps once and exits), so that run's kernel log held only pre-capture
+history — "no `[ROOTCHECK-*]`" was not evidence of anything. `evidence/notes.md`
+§6 now carries the corrected poll-and-stream-to-host recipe.
+
+[`run_bootA.sh`](run_bootA.sh) — orchestration for that one boot, in the order
+that matters (`0x778` → `0x780` → local repair of the cred that was actually
+installed → confirm → only then poke). `ADB=`/`SER=`/`BIN_LOCAL=` overridable.
+
 [`artifacts/guard_post_handler.s`](artifacts/guard_post_handler.s) — the kill
 chain with relocations filled in. `adrp x9, #0` in the older listings is
 `.data..ro_after_init`; `bl #0x4ac` is `oplus_root_check_succ`. Regenerate with

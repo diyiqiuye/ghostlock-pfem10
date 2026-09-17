@@ -14,7 +14,7 @@ inference it says so. **Nothing here is a guess presented as a result.**
 
 | # | Requested | Status |
 |---|---|---|
-| 1 | One complete kill scene (dmesg + kevent + userspace) | ⚠ **userspace only** — `evidence/kill.log`. Kernel side NOT captured. |
+| 1 | One complete kill scene (dmesg + kevent + userspace) | ⚠ **userspace only** — `evidence/kill.log`. Kernel side still not captured for a real event; see `2026-09-18-bootA/README.md` §3 for why the first attempt's capture was blind. |
 | 2 | Timeline of the same run, LT wait method | ✅ `kill.log` + §2 below |
 | 3 | Module runtime addresses, `kptr_restrict`, `perf_event_paranoid` | ⚠ **partial** — see §3: bases are masked in the baseline capture but real in the 09-15 capture |
 | 4 | Reloc-resolved disassembly | ✅ `artifacts/guard_post_handler.s`, `artifacts/guard_relocs.txt`, `artifacts/guard_disasm.txt` |
@@ -415,7 +415,7 @@ the 09-14 logs write `0xffffff802a7e0be0`, which is the P0 alias
 
 | Channel | Enforcing (plain shell) | After W1 → Permissive |
 |---|---|---|
-| `dmesg` / `/dev/kmsg` | ❌ `klogctl: Permission denied` | ✅ readable — **21 718 lines captured** |
+| `dmesg` / `/dev/kmsg` | ❌ `klogctl: Permission denied` | ✅ readable (21 466 lines captured) — **but `dmesg -w` is a no-op here, see below** |
 | `/proc/kallsyms` | ❌ `Permission denied` | ⚠ opens, **all addresses zeroed** |
 | `/proc/modules` | ⚠ readable, **base `0x0`** | ⚠ readable; base was real (`0xffffffe2…`) in the 09-15 run |
 | `/proc/sys/kernel/kptr_restrict` | ❌ `Permission denied` (read *and* write) | observed as `0` once (`out/t5_keepalive.txt`) |
@@ -428,14 +428,35 @@ the 09-14 logs write `0xffffff802a7e0be0`, which is the P0 alias
 
 **Recipe** (this is the only thing standing between us and item 1):
 
-```bash
-# 1. start the capture BEFORE the chain, in the same shell that later goes Permissive
-adb shell 'dmesg -w > /data/local/tmp/k 2>&1 &'
-# 2. run the chain (W1 -> WV@0x778 -> WV@0x780 -> exec), unchanged
-# 3. immediately afterwards
-adb shell "grep -aE 'ROOTCHECK|oplus_root|sys_call_number|set_id_flag|addr_limit|enforce|path@@|execve_' /data/local/tmp/k"
-adb pull /data/local/tmp/k
-```
+> **⛔ `dmesg -w` DOES NOT WORK ON THIS DEVICE.** toybox ignores `-w`: it dumps
+> the buffer once and exits. Measured — `dmesg -w > f &`, then 6 s later `f` is
+> 1 575 072 bytes and never grows again. A capture started that way contains
+> **only the history already in the ring buffer at start time**; the first Boot A
+> attempt's log ended at wall 04:45:54 while the capture was launched at
+> 04:46:05, i.e. it held **zero** incident data. "No `[ROOTCHECK-*]` in the log"
+> was therefore not evidence of anything.
+>
+> **Also: never leave the kernel log only on the device.** The ring buffer is
+> gone after a reboot — and the interesting event *is* the reboot. And after one
+> of these events the files in `/data/local/tmp` become SELinux-denied to shell
+> (`-????????? ? ? ? ? ?`, `stat` refused, `rm`/`mv` refused), so the previous
+> boot's log can only be read after re-reaching Permissive.
+>
+> **Poll, and stream to the host:**
+>
+> ```bash
+> # host side; the device shell emits only the delta each round
+> adb shell 'n=0; while :; do dmesg > /data/local/tmp/_k.tmp; \
+>   c=$(wc -l < /data/local/tmp/_k.tmp); [ "$c" -lt "$n" ] && n=0; \
+>   tail -n +$((n+1)) /data/local/tmp/_k.tmp; n=$c; sleep 2; done' >> klog.host &
+> # ... run the chain ...
+> grep -aE 'ROOTCHECK|oplus_root|sys_call_number|set_id_flag|addr_limit|enforce|path@@|execve_' klog.host
+> ```
+
+`dmesg` itself is only readable once SELinux is Permissive, so the poller must be
+started *after* the run has flipped — or it can simply be re-run afterwards,
+since the ring buffer persists for as long as the boot does. It does **not**
+persist across a reboot, which is why the host-side file matters.
 
 The extra patterns matter. Path 1 prints `[ROOTCHECK-CAP-ERROR]` /
 `[ROOTCHECK-RC-ERROR]`; path 2 prints `[ROOTCHECK-EXEC-INFO]:common %s result %s`
