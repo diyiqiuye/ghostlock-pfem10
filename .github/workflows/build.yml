@@ -1,0 +1,55 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  exploit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache NDK r28c
+        id: ndk-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/android-ndk-r28c-linux.zip
+          key: ndk-r28c-linux
+
+      - name: Install NDK r28c
+        run: |
+          set -euo pipefail
+          ZIP="$RUNNER_TEMP/android-ndk-r28c-linux.zip"
+          if [ ! -s "$ZIP" ]; then
+            curl -fsSL --retry 3 --retry-delay 5 \
+              -o "$ZIP" \
+              https://dl.google.com/android/repository/android-ndk-r28c-linux.zip
+          fi
+          unzip -q -o "$ZIP" -d "$RUNNER_TEMP"
+          echo "ANDROID_NDK_HOME=$RUNNER_TEMP/android-ndk-r28c" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/android-ndk-r28c/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version | head -1
+
+      - name: Build
+        run: make
+
+      - name: Verify
+        run: |
+          set -euo pipefail
+          test -x exploit_guard
+          readelf -h exploit_guard | grep -E 'Class|Machine|Type'
+          readelf -h exploit_guard | grep -q 'AArch64' || { echo "not AArch64" >&2; exit 1; }
+          ls -l exploit_guard
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: exploit_guard
+          path: exploit_guard
+          if-no-files-found: error
+          retention-days: 30

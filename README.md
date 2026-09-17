@@ -2,6 +2,8 @@
 
 **English** · [中文](README.zh-CN.md)
 
+[![build](https://github.com/diyiqiuye/ghostlock-pfem10/actions/workflows/build.yml/badge.svg)](https://github.com/diyiqiuye/ghostlock-pfem10/actions/workflows/build.yml)
+
 GhostLock (CVE-2026-43499) port for the OPPO Find X5 Pro on ColorOS 16. Reaches a `uid=0` child process and a loaded `kernelsu.ko`; the root process is intercepted.
 
 ## Vulnerability
@@ -197,11 +199,23 @@ CONFIG_KASAN=y
 
 ## Build
 
+NDK **r28c**. `-O1` / API **26** / `-D__ARM=1` are **fixed** — they keep the reclaim stack-frame geometry (`delta=0` calibration). Changing any of them requires re-calibrating on device.
+
 ```bash
-NDK=/path/to/android-ndk
-"$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android31-clang" \
-  -O2 -Isrc/core -Isrc/devices/pfem10 -o exploit_guard src/core/exploit.c
+export ANDROID_NDK_HOME=/path/to/android-ndk-r28c
+make                      # → exploit_guard
+./build.sh                # same, with NDK auto-detection
 ```
+
+Manual:
+
+```bash
+"$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang" \
+  -D__ARM=1 -O1 -Wall -Wextra -pthread -Isrc/core -Isrc/devices/pfem10 \
+  -o exploit_guard src/core/exploit.c
+```
+
+CI builds on every push (`.github/workflows/build.yml`, Ubuntu + NDK r28c, artifact `exploit_guard`).
 
 ## Setup
 
@@ -219,6 +233,8 @@ src/core/                 exploit.c  payload.c  payload.h  fdset_map.h
 src/devices/pfem10/       pfem10_target.h
 tools/                    kdis.py  kdis_ko.py  find_task_off.py  slide_resolve.py
 artifacts/                guard_disasm.txt  guard_exempt_table.txt  harden_disasm.txt
+Makefile  build.sh        exploit build (-O1, API 26, NDK r28c)
+.github/workflows/        build.yml — cloud build + artifact
 ```
 
 `tools/kdis_ko.py` — RELA matched by `sh_info`; on these builds `.text` relocs live in `.rela.text.<func>`, so name-based lookup returns nothing.

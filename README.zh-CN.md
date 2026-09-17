@@ -2,6 +2,8 @@
 
 [English](README.md) · **中文**
 
+[![build](https://github.com/diyiqiuye/ghostlock-pfem10/actions/workflows/build.yml/badge.svg)](https://github.com/diyiqiuye/ghostlock-pfem10/actions/workflows/build.yml)
+
 GhostLock（CVE-2026-43499）针对 ColorOS 16 上 OPPO Find X5 Pro 的移植。已做到 `uid=0` 子进程 + `kernelsu.ko` 载入；root 进程被拦截。
 
 ## 漏洞
@@ -197,11 +199,23 @@ CONFIG_KASAN=y
 
 ## 编译
 
+NDK **r28c**。`-O1` / API **26** / `-D__ARM=1` 是**固定参数** —— 它们维持回收栈帧的几何（`delta=0` 标定）。改动任何一个都要在真机上重新标定。
+
 ```bash
-NDK=/path/to/android-ndk
-"$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android31-clang" \
-  -O2 -Isrc/core -Isrc/devices/pfem10 -o exploit_guard src/core/exploit.c
+export ANDROID_NDK_HOME=/path/to/android-ndk-r28c
+make                      # → exploit_guard
+./build.sh                # 同上，自动探测 NDK
 ```
+
+手动：
+
+```bash
+"$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang" \
+  -D__ARM=1 -O1 -Wall -Wextra -pthread -Isrc/core -Isrc/devices/pfem10 \
+  -o exploit_guard src/core/exploit.c
+```
+
+每次 push 都会云端编译（`.github/workflows/build.yml`，Ubuntu + NDK r28c，产物 `exploit_guard`）。
 
 ## 部署
 
@@ -219,6 +233,8 @@ src/core/                 exploit.c  payload.c  payload.h  fdset_map.h
 src/devices/pfem10/       pfem10_target.h
 tools/                    kdis.py  kdis_ko.py  find_task_off.py  slide_resolve.py
 artifacts/                guard_disasm.txt  guard_exempt_table.txt  harden_disasm.txt
+Makefile  build.sh        exploit 构建（-O1、API 26、NDK r28c）
+.github/workflows/        build.yml —— 云端编译 + 产物
 ```
 
 `tools/kdis_ko.py` —— RELA 按 `sh_info` 匹配；这些 build 的 `.text` 重定位在 `.rela.text.<func>` 里，按名字查会返回空。
