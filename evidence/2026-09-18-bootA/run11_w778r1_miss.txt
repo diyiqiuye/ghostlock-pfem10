@@ -1,0 +1,9 @@
+=== v12 W7[W7]: task=0xffffff8871281280 cred@0x780 = private cred page ===
+W7[W7] write value = private cred page 0xffffff8826c22de0 (+0 shape comp)
+W7[W7] side effect will land at cred_page+8 — run the LOCAL repair pass afterwards (V12_W7_ZERO=1 V12_W7_REPAIR_CRED=1)
+W7[W7] write_value = 0xffffff8826c22de0
+W7[W7] write_target= 0xffffff88712819f8
+probe_state    = R
+probe_done     = 0
+✗ W7[W7] miss (probe_state=R)
+W7[W7] PIN child 7011 holds the payload page 20s; writer returns now

