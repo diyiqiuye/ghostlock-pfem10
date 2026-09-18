@@ -268,7 +268,10 @@ value — because firing would build a divergent pair.
 
 ⚠ `HOLD` must outlive the second shot. If the first shot's PIN child dies first,
 the page is freed and reallocated and "same value" becomes a dangling pointer.
-The default `HOLD=20` is **too short**; use `HOLD=600`.
+The default `HOLD=20` is **too short**; use `HOLD=600`. This is now the *default*
+whenever `SAME_VALUE=1` — the old unconditional 20 s meant the default
+configuration was itself the trap — and an explicit short `HOLD` with
+`SAME_VALUE=1` now warns loudly instead of silently producing a dangling pointer.
 
 ⚠ `CONTROL=1` used to change **only step 5**, so it produced
 `(init_cred, fresh page)` — a divergent pair — while this file claimed it
@@ -717,8 +720,49 @@ conclusion requires the channel to be proven reachable first):
 that matters (`0x778` → `0x780` **with the same value** → local repair of the cred
 that was actually installed → confirm → only then poke). `ADB=`/`SER=`/
 `BIN_LOCAL=` overridable; `SAME_VALUE=1` (default) enforces the same-value rule,
-`CONTROL=1` reproduces the old `init_cred` cell, `LAUNDER=1` enables the gated
-launder, `HOLD=600` is required for the same-value sequence.
+`LAUNDER=1` enables the gated launder, `HOLD=600` is required for the same-value
+sequence.
+
+**Retries are split per stage** (`R5`/`R6`), because the two stages have opposite
+risk profiles:
+
+| | stage | retry safety |
+|---|---|---|
+| `R5` | step 5, `task+0x778` | **safe** — a miss installs nothing, and the stamp criterion makes a failed round *readable*, so another shot is just another attempt. `R5=3` takes the per-shot hit rate from ~p to ~1−(1−p)³. |
+| `R6` | step 6, `task+0x780` | **not safe, and not needed** — it only fires *after* step 5 landed, so a retry shoots at an already-divergent task: another chance to land a second, different page, with no upside, since one landing completes the pair. Keep it at 1. |
+
+`R5` defaults to `ROUNDS`, `R6` to `1`.
+
+**The recommended launder run** — the default sprayed-page path, *not*
+`CONTROL=1`:
+
+```bash
+LAUNDER=1 R5=3 R6=1 HOLD=600 CHAINWAIT=6000 NODRAIN=1 WATCH=180 ./run_bootA.sh
+```
+
+`CONTROL=1` would also produce a consistent pair, but by writing the `init_cred`
+pointer, whose side effect corrupts `init_cred+8` **globally** — and "the
+framework dies" is one of the things being watched, so carrying a device-wide
+fault into the background of the measurement muddies exactly the reading this run
+exists to take. The sprayed-page path costs only "both shots must land", which is
+what `R5=3` is for. `CONTROL=1` stays as the only *proven* consistent pair and as
+a control, not as the recommended configuration.
+
+**Which page got installed is read from the unconditional line.** `run_w7` prints
+the write value on two lines, and only one of them is unconditional:
+
+```
+L1793  W7[..] write value = private cred page 0x..   — spray path only
+L1802  W7[..] write_value = 0x..                     — after the if/else, ALL paths
+```
+
+The runner used to match the first wording, so on `CONTROL=1` the extraction came
+back empty, `if [ -n "$CRED" ]` skipped the repair, and the same-value
+conjunction's own `[ -n "$CRED" ]` term held it at 0 — the launder gate would
+have refused forever. A silent no-op on both counts, from a regex that recognised
+one of two print sites. Both it and the `write_target` extraction (the stamp
+criterion's *input*) now go through `wv_from`/`wt_from`, which are exercised by
+the regression test alongside the criterion itself.
 
 **Both streams start before the thing they measure.** `uid.stream` runs from
 stage 1; `cred.stream` starts **at the poke**, not after the watch — the poke

