@@ -176,15 +176,62 @@ and the kernel is built with **`CONFIG_PANIC_ON_OOPS=y`** (`CONFIG_PANIC_ON_OOPS
 
 So the divergence is *latent* — it does nothing while the victim just spins —
 until **any** `commit_creds` happens on that task: `setresuid` / `setresgid` /
-`setuid` / `setgid` / `capset`, or **`execve` via `install_exec_creds`**. The LT
-child reaches `execve` as its very next step after the report loop, which makes
-that the shortest route from a landed write to a panic.
+`setuid` / `setgid` / `capset`, or **`execve` via `install_exec_creds`**.
 
-**This is the leading mechanism candidate for the reboots**, and it explains the
-otherwise-puzzling shape split: the `base+0x100` → global-`selinux_enforcing`
-shape never touches 0x778/0x780 at all, so it *cannot* create divergence — which
-is why it has never rebooted. It also predicts the one symmetric case that was
-observed: the run that landed **0x778** alone (not 0x780) also rebooted.
+> **⛔ Retracted (2026-09-18 late): this is NOT the reboot mechanism.**
+>
+> An earlier revision of this section called the divergence "the leading mechanism
+> candidate for the reboots" and said it "explains the shape split". It does not,
+> and the reason is now measured rather than argued:
+>
+> * `commit_creds` takes its task from **`current`** — `0x1867a0 mrs x20, sp_el0`.
+>   Its signature is `commit_creds(struct cred *new)`; there is no task argument.
+>   So a divergence only matters if the task **holding** it calls `commit_creds`
+>   itself.
+> * The rebooting runs were all `V12_NO_EXEC=1` (stated verbatim at
+>   `run3_0445.log:18`, `run9_0606.log:20`, `run10_0616.log:24`), so the victim
+>   never issued `execve` and never reached `commit_creds` at all.
+> * Run 10 had no poke whatsoever (`grep -c poke` = 0).
+> * `exit_creds` nulls **both** pointers before `put_cred`
+>   (`0x185cb8 str xzr,[x19,#0x778]`; `0x185d24 str xzr,[x19,#0x780]`), so the
+>   victim's `_exit(0)` **erases** the divergence instead of tripping on it.
+>
+> ⇒ In those runs the divergence was **inert**. The `BUG_ON` is real, but it is a
+> landmine that has not gone off. "Shape A never reboots" goes back to being a
+> correlation. What the landmine actually constrains is **laundering**, because
+> `setresgid`/`setresuid` call `commit_creds` themselves.
+>
+> **The quantity that actually separates the chains is pointer equality, and that
+> means the two shots must write ONE value** — see the next subsection.
+
+### ★★★ The two shots must write the *same* value — not merely both land
+
+`BUG_ON` compares **pointers**. Two pages that both carry `uid 0` are still two
+different objects. The captures make the distinction concrete:
+
+| chain | 0x778 shot | 0x780 shot | pointers |
+|---|---|---|---|
+| old (`t5loop.sh MODE=CRED`) | `in[0]=0xffffff802a7e0be0` | `in[0]=0xffffff802a7e0be0` | **equal** → ksud loaded, manager alive 120 s |
+| new (`run_bootA.sh`) | `0xffffff88679bade0` (run 9) | `0xffffff8785d6ade0` | **differ** → divergent even with both landed |
+
+`tools/t5loop.sh` applies **one** `$ENVV` to **every** offset, so `MODE=CRED`
+made both shots identical *by construction*. `run_bootA.sh` fired step 5 and
+step 6 each with an empty `$extra`, so each sprayed its **own** page.
+
+⇒ The requirement is **"both shots write the same value"**. `run_bootA.sh` now
+enforces it (`SAME_VALUE=1`, the default): step 6 reuses step 5's observed
+`write_value` verbatim, and **refuses to fire at all** if it cannot recover that
+value — because firing would build a divergent pair.
+
+⚠ `HOLD` must outlive the second shot. If the first shot's PIN child dies first,
+the page is freed and reallocated and "same value" becomes a dangling pointer.
+The default `HOLD=20` is **too short**; use `HOLD=600`.
+
+⚠ `CONTROL=1` used to change **only step 5**, so it produced
+`(init_cred, fresh page)` — a divergent pair — while this file claimed it
+reproduced cell 2. Fixed: it now sets both shots to `init_cred`. (Cell 2's cost
+stands: the side effect corrupts `init_cred+8` globally, which is what
+`Uid: 0 0 4294967176 0` is.)
 
 **Consequences for anything that wants to launder the credential**
 (`setresgid` + `setresuid`, to swap the sprayed page for a real `struct cred`):
@@ -196,19 +243,26 @@ observed: the run that landed **0x778** alone (not 0x780) also rebooted.
   `security_prepare_creds(...)`, and 147/149 are both on the guard's exempt list.
 - **But its precondition is the opposite of "skip the 0x778 shot".** The launder
   itself calls `commit_creds`, so it must only be issued when **both** pointers
-  already hold the same value. Doing it after a single-field landing converts a
-  latent divergence into an immediate panic.
-- `V12_LAUNDER=1` is therefore gated: it compares the `0x780` view (`getuid()`)
-  against the `0x778` view (`/proc/self/status` `Uid:`) and **refuses** when they
-  disagree. That check is necessary but not sufficient — two distinct objects can
-  carry equal ids — so the sound configuration remains "both fields written with
-  the same page". The LT report line now prints both views
-  (`uid=` / `real_uid=` / `consistent=`) so the state is read, not inferred.
+  already hold the same value.
+- `V12_LAUNDER=1` is gated on **two** things, and the first is not an observation:
+  1. **`V12_W7_SAME_VALUE=1`** — the *provenance* fact that both shots were given
+     the same value. With no read primitive, pointer identity is unobservable, so
+     this cannot be replaced by a better userspace check; it must be declared.
+  2. `consistent=1` — the `0x780` view (`getuid()`) agreeing with the `0x778` view
+     (`/proc/self/status` `Uid:`). **Necessary but not sufficient on its own**:
+     two distinct pages both carrying `uid 0` read equal while the pointers differ
+     — which is exactly the case the runner used to manufacture. Given (1), it
+     becomes sufficient: agree + same value ⇒ both landed on the same page.
+  Either check failing ⇒ refuse, and the four-case table goes into the evidence.
+  The LT report line prints both views (`uid=` / `real_uid=` / `consistent=`) plus
+  `same_value_declared=` so the state is read, not inferred.
 
-Full derivation, including the write-shape overlap self-check (closed offline:
-the shape words live in the fd_set grid on the kernel stack while the side effect
-lands inside the sprayed page, so the two cannot overlap in either shape):
-[`evidence/2026-09-18-cred-launder-verification.md`](evidence/2026-09-18-cred-launder-verification.md).
+Full derivation: [`evidence/2026-09-18-divergence-is-latent.md`](evidence/2026-09-18-divergence-is-latent.md)
+and [`evidence/2026-09-18-cred-launder-verification.md`](evidence/2026-09-18-cred-launder-verification.md)
+(the latter's §2.3 is retracted in place). The write-shape overlap self-check is
+closed offline: the shape words live in the fd_set grid on the kernel stack while
+the side effect lands inside the sprayed page, so the two cannot overlap in either
+shape.
 
 ## Detection paths
 
@@ -480,10 +534,33 @@ disassembly (not generic 5.10 source): the `commit_creds` double store, the
 `prepare_creds` allocation and measured `sizeof(struct cred) = 0xA8`, the
 `BUG_ON(cred != real_cred)` divergence hazard above, the closed write-shape
 overlap self-check, and the evidence-coverage audit of the 13 boots.
+**§2.3 is retracted in place** — the divergence is latent, not the reboot
+mechanism.
+
+[`evidence/2026-09-18-divergence-is-latent.md`](evidence/2026-09-18-divergence-is-latent.md)
+— the round-2 verification. `commit_creds` takes its task from `current`
+(`0x1867a0 mrs x20, sp_el0`), `exit_creds` nulls both pointers before `put_cred`,
+and the raw captures show the old chain wrote **one identical value**
+(`0xffffff802a7e0be0`) to both slots while the new chain wrote two different
+pages. So the criterion is pointer equality — "both shots write the same value",
+not "both shots land".
+
+[`postreboot_forensics.sh`](postreboot_forensics.sh) — reboot forensics that does
+**not** depend on the poller. `CONFIG_PSTORE_RAM/CONSOLE=y` means a panic leaves
+the console tail in ramoops across a reset, and `CONFIG_PANIC_TIMEOUT=-1` means
+`panic()` does *not* auto-reboot — so a clean `bootreason=reboot` and a panic are
+mutually exclusive readings. Pulls `/sys/fs/pstore/`, greps for `kernel BUG` /
+`__put_cred` / `cred.c`, prints the boot-reason **string** (history entries have
+carried `reboot,shell` / `bootloader` / `reboot,edl` suffixes, so the reason
+distinguishes an actor where the epoch does not), and checks whether the ramoops
+region is actually registered so it only claims the verdict it is entitled to.
 
 [`run_bootA.sh`](run_bootA.sh) — orchestration for that one boot, in the order
-that matters (`0x778` → `0x780` → local repair of the cred that was actually
-installed → confirm → only then poke). `ADB=`/`SER=`/`BIN_LOCAL=` overridable.
+that matters (`0x778` → `0x780` **with the same value** → local repair of the cred
+that was actually installed → confirm → only then poke). `ADB=`/`SER=`/
+`BIN_LOCAL=` overridable; `SAME_VALUE=1` (default) enforces the same-value rule,
+`CONTROL=1` reproduces the old `init_cred` cell, `LAUNDER=1` enables the gated
+launder, `HOLD=600` is required for the same-value sequence.
 
 [`artifacts/guard_post_handler.s`](artifacts/guard_post_handler.s) — the kill
 chain with relocations filled in. `adrp x9, #0` in the older listings is

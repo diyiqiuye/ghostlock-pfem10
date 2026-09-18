@@ -160,13 +160,52 @@ commit_creds @0xffffffc008186784
 
 所以分歧态是**潜伏**的 —— 受害者进程只是自旋时什么都不会发生 —— 直到该任务上发生**任何**
 `commit_creds`：`setresuid` / `setresgid` / `setuid` / `setgid` / `capset`，
-或者 **`execve`（经 `install_exec_creds`）**。LT 子进程报告循环之后的下一步正好就是 `execve`，
-这让它成为「写落地 → panic」之间最短的一条路。
+或者 **`execve`（经 `install_exec_creds`）**。
 
-**这是目前重启机制的头号候选**，而且它解释了此前说不清的 shape 分界：
-`base+0x100` → 全局 `selinux_enforcing` 那种形状**根本不碰** 0x778/0x780，
-所以**不可能**制造分歧 —— 这正是它从不重启的原因。它也预测了唯一被观测到的对称情形：
-那次**只落地 0x778**（而非 0x780）的 run 同样重启了。
+> **⛔ 撤回（2026-09-18 晚）：这【不是】重启机制。**
+>
+> 本节早先的版本把分歧态称为「重启机制的头号候选」，并说它「解释了 shape 分界」。它不解释，
+> 而且理由是**实测**的而不是论证的：
+>
+> * `commit_creds` 取任务的方式是 **`0x1867a0 mrs x20, sp_el0`** —— 它的签名是
+>   `commit_creds(struct cred *new)`，**没有 task 参数**，只作用于 `current`。
+>   所以分歧态只有在**持有它的那个任务自己**调 `commit_creds` 时才起作用。
+> * 那些重启的 run **全都是 `V12_NO_EXEC=1`**（`run3_0445.log:18`、`run9_0606.log:20`、
+>   `run10_0616.log:24` 逐字写明），受害者**从没发过 `execve`**，也就从没到过 `commit_creds`。
+> * run 10 **一次 poke 都没有**（`grep -c poke` = 0）。
+> * `exit_creds` 把**两个**指针先置 NULL 再 `put_cred`
+>   （`0x185cb8 str xzr,[x19,#0x778]`；`0x185d24 str xzr,[x19,#0x780]`），
+>   所以子进程的 `_exit(0)` 是**抹掉**分歧，而不是踩爆它。
+>
+> ⇒ 那几次里分歧态是**惰性**的。`BUG_ON` 是真的，但它是一颗**还没炸**的地雷。
+> 「shape A 从不重启」退回为**相关性**。地雷真正约束的是**洗白**，因为
+> `setresgid`/`setresuid` 自己就调 `commit_creds`。
+>
+> **真正把两条链分开的量是指针相等 —— 也就是两枪必须写同一个值。**
+
+### ★★★ 两枪必须写**同一个值**，而不只是「都落地」
+
+`BUG_ON` 比的是**指针**。两张都带 `uid 0` 的页仍然是两个不同的对象。原始证据里这个区别是硬的：
+
+| 链 | 0x778 那一枪 | 0x780 那一枪 | 指针 |
+|---|---|---|---|
+| 老链（`t5loop.sh MODE=CRED`） | `in[0]=0xffffff802a7e0be0` | `in[0]=0xffffff802a7e0be0` | **相等** → ksud 载入、manager 活 120s |
+| 新链（`run_bootA.sh`） | `0xffffff88679bade0`（run 9） | `0xffffff8785d6ade0` | **不等** → 即使两枪都落地也是分歧 |
+
+`tools/t5loop.sh` 把**同一个** `$ENVV` 施加到**每一个** offset，所以 `MODE=CRED` 让两枪
+**同值是构造出来的**。而 `run_bootA.sh` 的 step 5 与 step 6 各自以空 `$extra` 开火，
+**各喷各的页**。
+
+⇒ 要求是**「两枪写同一个值」**。`run_bootA.sh` 现在强制这一点（`SAME_VALUE=1`，默认开）：
+step 6 逐字复用 step 5 观测到的 `write_value`，**抽不到值就拒绝发第二枪** —— 因为发出去就是
+在制造分歧对。
+
+⚠ `HOLD` 必须活过第二枪。第一枪的 PIN child 若先死，页会被释放并重新分配，
+「同值」就变成悬垂指针。默认 `HOLD=20` **太短**，用 `HOLD=600`。
+
+⚠ `CONTROL=1` 以前**只改 step 5**，所以它产出的是 `(init_cred, 新喷页)` —— 一个分歧对 ——
+而本文件却声称它复现了 cell 2。**已修**：现在两枪都设 `init_cred`。
+（cell 2 的代价仍在：副作用会把 `init_cred+8` **全局**写坏，`Uid: 0 0 4294967176 0` 就是它。）
 
 **对任何想洗白 cred 的方案（`setresgid` + `setresuid`，把喷页换成真正的 `struct cred`）的后果：**
 
@@ -175,17 +214,22 @@ commit_creds @0xffffffc008186784
   = `kmem_cache_alloc(cred_jar)` + `memcpy(new, task->cred, 0xA8)` + `security_prepare_creds(...)`；
   147/149 都在看门狗豁免表内。
 - **但它的前提与「跳过 0x778 那一枪」正好相反。** 洗白自身就要调 `commit_creds`，
-  所以只能在**两个指针已经指向同一张页**时才发。在单字段落地之后做洗白，
-  等于把潜伏的分歧变成立即 panic。
-- 因此 `V12_LAUNDER=1` 是带门的：它把 `0x780` 视角（`getuid()`）与 `0x778` 视角
-  （`/proc/self/status` 的 `Uid:`）对比，**不一致就直接拒绝**。这个检查必要但不充分 ——
-  两个不同对象可以带相同 id —— 所以可靠配置仍然是「两个字段都写成同一张页」。
-  LT 报告行现在同时打印两个视角（`uid=` / `real_uid=` / `consistent=`），
+  所以只能在**两个指针已经指向同一个对象**时才发。
+- 因此 `V12_LAUNDER=1` 由**两个**条件把门，而且第一条不是观测：
+  1. **`V12_W7_SAME_VALUE=1`** —— 两枪被指定了同一个值的**出身**事实。没有读原语 ⇒
+     指针身份**不可观测** ⇒ 它不能被任何更好的用户态检查替代，只能**声明**。
+  2. `consistent=1` —— `0x780` 视角（`getuid()`）与 `0x778` 视角（`/proc/self/status` 的 `Uid:`）一致。
+     **单靠它必要但不充分**：两张不同的页都带 `uid 0` 时会读出「一致」而指针仍然不同 ——
+     而这正是 runner 过去在生产的那一行。加上第 1 条之后它才充分：
+     内容一致 + 同值 ⇒ 两枪都落在同一张页。
+  任一条件不满足 ⇒ **拒绝**，并把四情形表打进证据。LT 报告行同时打印两个视角
+  （`uid=` / `real_uid=` / `consistent=`）与 `same_value_declared=`，
   让状态被**读到**而不是被推断。
 
-完整推导（含写形状重叠自查，离线已关闭：形状词在内核栈的 fd_set 网格里，
-而副作用落在喷页内，两者不可能重叠）：
-[`evidence/2026-09-18-cred-launder-verification.md`](evidence/2026-09-18-cred-launder-verification.md)。
+完整推导：[`evidence/2026-09-18-divergence-is-latent.md`](evidence/2026-09-18-divergence-is-latent.md)
+与 [`evidence/2026-09-18-cred-launder-verification.md`](evidence/2026-09-18-cred-launder-verification.md)
+（后者 §2.3 已就地标注撤回）。写形状重叠自查离线已关闭：形状词在内核栈的 fd_set 网格里，
+而副作用落在喷页内，两者不可能重叠。
 
 ## 检测路径
 
@@ -425,7 +469,27 @@ run.sh                    设备侧运行编排（跨重启重试）
 —— 对 cred 洗白方案的核实，**依据是本镜像自己的反汇编**（不是通用 5.10 源码）：
 `commit_creds` 的双写、`prepare_creds` 的真分配与实测 `sizeof(struct cred) = 0xA8`、
 上面那条 `BUG_ON(cred != real_cred)` 分歧态、已关闭的写形状重叠自查，
-以及对 13 次 boot 的证据覆盖审计。
+以及对 13 次 boot 的证据覆盖审计。**其 §2.3 已就地标注撤回** —— 分歧是惰性的，不是重启机制。
+
+[`evidence/2026-09-18-divergence-is-latent.md`](evidence/2026-09-18-divergence-is-latent.md)
+—— 第二轮核实。`commit_creds` 取任务是 `current`（`0x1867a0 mrs x20, sp_el0`），
+`exit_creds` 把两个指针先置 NULL 再 `put_cred`；而原始证据显示老链往两个槽里写的是**同一个值**
+（`0xffffff802a7e0be0`），新链写的是**两张不同的页**。所以判据是**指针相等** ——
+「两枪写同一个值」，不是「两枪都落地」。
+
+[`postreboot_forensics.sh`](postreboot_forensics.sh) —— **不依赖 poller** 的重启后取证。
+本机 `CONFIG_PSTORE_RAM/CONSOLE=y` ⇒ panic 会把 console 尾部留在 ramoops 里跨复位存活；
+而 `CONFIG_PANIC_TIMEOUT=-1` ⇒ `panic()` **不自动重启** —— 所以「干净的 `bootreason=reboot`」
+与「panic」是**互斥**的两种读数。脚本 pull `/sys/fs/pstore/`、grep `kernel BUG` / `__put_cred` / `cred.c`、
+打出 boot reason 的**字符串**（历史上出现过 `reboot,shell` / `bootloader` / `reboot,edl` 后缀，
+所以 reason 能区分执行者，epoch 不能），并检查 ramoops 保留区是否真的注册了 ——
+只下它**有权下**的结论。
+
+[`run_bootA.sh`](run_bootA.sh) —— 那一次 boot 的编排，顺序是要紧的
+（`0x778` → `0x780` **用同一个值** → 对**真正被装上**的那个 cred 做本地修复 → 确认 → 才 poke）。
+`ADB=`/`SER=`/`BIN_LOCAL=` 可覆盖；`SAME_VALUE=1`（默认）强制同值规则，
+`CONTROL=1` 复现旧的 `init_cred` cell，`LAUNDER=1` 打开带门的洗白，
+同值序列**必须** `HOLD=600`。
 
 [`artifacts/guard_post_handler.s`](artifacts/guard_post_handler.s) —— 重定位已填的击杀链。
 旧清单里的 `adrp x9, #0` 其实是 `.data..ro_after_init`，`bl #0x4ac` 是 `oplus_root_check_succ`。
