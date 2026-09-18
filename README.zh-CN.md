@@ -30,10 +30,16 @@ GhostLock（CVE-2026-43499）针对 ColorOS 16 上 OPPO Find X5 Pro 的移植。
 | compact waiter 触发（`CMP_REQUEUE_PI` → `EDEADLK`） | 成功 |
 | `task_struct` 泄漏（perf） | 成功 |
 | PI 写原语（8 字节；值 = `0` 或合法内核地址） | 成功 |
-| `task+0x778` / `task+0x780` → `Uid=root` | 成功 —— 但**单字段落地会让任务进入分歧态**，见[分歧态那一节](#-单字段落地会让任务进入分歧态--而这是一条硬-bug_on) |
+| `task+0x778` **或** `task+0x780` 单独落地 → `Uid=root` | 成功 —— 但**单字段落地会让任务进入分歧态**，而这是一条潜伏的硬 `BUG_ON`。见[分歧态那一节](#-单字段落地会让任务进入分歧态--而这是一条硬-bug_on) |
+| **两字段写成同一个值**（一致对） | ❌ **用喷页从未产生过。** 只在全局 `init_cred` 别名上出现过（09-14，`CONTROL=1`）。runner 现在强制它（`SAME_VALUE=1`）；**未上机** |
 | cred 洗白（`setresgid` + `setresuid`） | 已实现（`V12_LAUNDER=1`）；**未上机** |
 | `kernelsu.ko` 载入 | 成功 |
 | root 进程存活 | ⚠ **未定论** —— 见下 |
+| 重启机制 | ❌ **未建立。** 一个候选（分歧态）现已**被排除**；见下 |
+| 把 `probe_state` 当落地判据 | ❌ **错的 —— 不要用。** 三个反例；见下表 |
+| pstore/ramoops panic 通道 | ⚠ 仪器已有；**通道从未验证**（还没做 null test） |
+| 「受害者在纯用户态自旋」 | ⚠ **还没有读数** —— `uid.stream` 现在记 `utime`/`stime`/`nvcsw`，所以它可被检验 |
+| pi 侧单 pass 双写 | ⚠ **未建立**；`fdset_map.h` 里 `pi.pc`/`pi.left` 被硬编码为 0 |
 | Path A（UMH / `modprobe_path`） | `STATIC_USERMODEHELPER_PATH=""` |
 
 关于「root 进程存活」：[`evidence/kill.log`](evidence/kill.log) 里的几次 run 都走到了 `uid=0`
@@ -78,17 +84,48 @@ GhostLock（CVE-2026-43499）针对 ColorOS 16 上 OPPO Find X5 Pro 的移植。
 
 ```
 LT          perf 泄漏目标 task_struct → 落文件
-W7 阶段 1   task+0x778 = cred_page（real_cred → 喷页内的私有 cred）
-W7 阶段 2   task+0x780 = cred_page（cred）
-W7 阶段 3   cred_page+8 = 0（**局部**修复，第二个进程，ZERO 形状）
+W7 阶段 1   task+0x778 = V（real_cred → 喷页内的私有页；V 是**观测到的**值）
+W7 阶段 2   task+0x780 = V（cred）   ★ V12_W7_VALUE=V —— **同一个值**，不是新喷一页
+W7 阶段 3   V+8 = 0（对**真正被装上**的那张页做**局部**修复，第二个进程，ZERO 形状）
 LT 子进程   fexecve(loader 的 memfd) —— 不对 /data 路径做 execve
 loader      ksud late-load                    → kernelsu ... Live
 ```
 
+**阶段 2 必须显式拿到阶段 1 的值。** 阶段 1 与阶段 2 是**两个独立进程、各自喷各自的页**，
+所以「把 cred 页写进两个槽」是个陷阱：照字面读会产出 `(pageA, pageB)`，
+而因为 `commit_creds` 比的是**指针**，即便两枪都落地那也是分歧对。
+这不是假设 —— run 3 和 run 9 干的就是这件事：
+
+```
+run 9   0x778 那一枪  write value = 0xffffff88679bade0
+        0x780 那一枪  write value = 0xffffff8785d6ade0     <- 另一张页
+run 3   0x778 那一枪  write value = 0xffffff8787b5ade0
+        0x780 那一枪  write value = 0xffffff881bad2de0     <- 另一张页
+```
+
+因此 `run_bootA.sh` 用 `V12_W7_VALUE=<阶段 1 观测到的值>` 开阶段 2 那一枪，
+**抽不到值就干脆不发**。`HOLD` 必须活过阶段 2，否则阶段 1 的页被释放并重新分配，
+「同值」就变成悬垂指针。见[同值规则那一节](#-两枪必须写同一个值而不只是都落地)。
+
+**一次 boot 只修一张页。** 阶段 3 清零 `V+8`。若两张页**不同**，把两页的 `+8` 都清零
+会抹掉 gid/suid 那枚戳（见下），让分歧**看起来**一致，所以 runner 只修**真正被装上**的那张页，
+且两枪值不一致时直接停。
+
 cred 页由 `payload.c` 构造：8 个 id 字段全 0、5 组 caps 全满，`user` / `user_ns` /
-`group_info` 指向 `root_user` / `init_user_ns` / `init_groups`。**它从来不是全局
-`init_cred`** —— 原因见下面「写原语及其副作用」，而阶段 3 之所以存在，是因为写的副作用
+`group_info` 指向 `root_user` / `init_user_ns` / `init_groups`。阶段 3 之所以存在，是因为写的副作用
 **必然**把它装入的那张 cred 的 `+8`（`gid`/`suid`）打坏。
+
+### 关于 `init_cred` —— 一个显式的二分
+
+本节与另一处曾经互相打脸（「从来不是全局 `init_cred`」 vs 「`CONTROL=1` 复现 cell 2」，
+而 cell 2 **就是** `init_cred`）。两句话对**不同角色**都是真的：
+
+* **作为目标 —— 禁止。** 写入 `init_cred` 指针会让副作用**全局**写坏 `init_cred+8` ——
+  `init_cred` 被所有内核线程共用，`Uid: 0 0 4294967176 0` 正是那次损坏。
+  除非显式设 `V12_ALLOW_INIT_CRED=1`，代码拒绝这条路。
+* **作为唯一被证实的一致对 —— 保留。** 09-14 走到 ksud 的那条链把**一个固定地址**
+  （`0xffffff802a7e0be0`）写进两个槽，所以 `real_cred == cred` 是**构造出来的** ——
+  这正是它能活到 `execve` 的原因。`CONTROL=1` 复现它。它是**对照**，不是可以依赖的配置。
 
 perf 泄漏：`PERF_TYPE_SOFTWARE` / `PERF_COUNT_SW_CPU_CLOCK`，`PERF_SAMPLE_REGS_INTR`，`exclude_user=1`。
 取值范围 `[0xffffff8400000000, 0xffffff90000000)`，票数 ≥ 15%。
@@ -225,6 +262,54 @@ step 6 逐字复用 step 5 观测到的 `write_value`，**抽不到值就拒绝�
   任一条件不满足 ⇒ **拒绝**，并把四情形表打进证据。LT 报告行同时打印两个视角
   （`uid=` / `real_uid=` / `consistent=`）与 `same_value_declared=`，
   让状态被**读到**而不是被推断。
+
+### ★ 仪器 1 —— 副作用是一枚「按目标打的戳」
+
+`*(write_value + 8) = write_target`，而 `cred+8` / `cred+0xc` 正是 `gid` / `suid`，
+所以一次 8 字节 store 同时落在两处：
+
+```
+cred.gid  = low32(write_target)
+cred.suid = hi32(write_target)
+```
+
+这是**实测**，不是模型。`out/t5_w7_778.txt` 里 `write_target = 0xffffff8800cdd178`、
+`Uid: 0 0 4294967176 0`，其中 `4294967176 = 0xffffff88 = hi32(write_target)`；
+`notes.md` §11 记下了另一半：`init_cred.gid = 0x00cdd178 = low32(write_target)`。
+
+两个用途：
+
+1. **它就是 `task+0x778` 的落地判据。** `/proc/<pid>/status` 读的是 `real_cred` =
+   `task+0x778` —— 正好是刚被装上的那张 cred —— 所以这枚戳**可从用户态直接读到**。
+   必须在**阶段 3 之前**读：修复会清零 `cred+8`，把戳抹掉
+   （`notes.md` §11 的 `t5_repair.txt`：修好之前读 `4294967176`，之后读 `0`）。
+2. **它是洗白门能抓住「两张不同页」的第二个、独立的理由。** 单靠 uid 那一半抓不住：
+   任何带 uid 0 的页都读 `0`，所以两张不同的页都会报「一致」。但
+   `low32(T+0x778)` 与 `low32(T+0x780)` **正好相差 8**，所以两张页时
+   `getgid()`（来自 `cred`）与 `status_gid`（来自 `real_cred`）不一致 ——
+   而 `lt_cred_ids_agree()` 同时比 gid 和 uid。
+
+⇒ `V12_W7_SAME_VALUE` 是**第二道**门，不是唯一一道。它仍然要紧：
+这枚戳只在**两个副作用都触发过**时才有区分力，同值规则补上的正是这个残余缺口。
+还要看清一道门**是什么** —— 它是检测器，不是阻止器。它只能拒绝；
+被拒绝的任务会在这次 boot 的剩余时间里保持分歧。真正让这一对**正确**的是同值规则，
+而这正是老链拥有、也是走到 `execve` 所必需的东西。
+
+### ★ 仪器 2 —— `probe_state` **不是**落地判据
+
+它在本项目里错了**三次**：W1 落在全局上却报 `R`；run 12 的 `D` 打在全局而非 cred 上；
+run 11 的 `R` 被当成落地写进了表格（`run11_w778r1_miss.txt` 与 run 7 的 `w7_w7781.txt`
+**逐行同构** —— 都是 `probe_state = R`、`probe_done = 0`）。请按目标各用各的判据：
+
+| 目标 | 落地判据 |
+|---|---|
+| `task+0x778` | `Uid:` 第 3 字段 `= hi32(write_target)` **且** `Gid:` 第 1 字段 `= low32(write_target)` —— 即上面那枚戳；**在阶段 3 之前读** |
+| `task+0x780` | 受害者自报的 `getuid()` |
+| 全局 `selinux_enforcing` | `getenforce` |
+| `probe_state` | ❌ **不是判据。** 顶多是链的一个提示；**永远不是**「写落地了」的证据 |
+
+`run_bootA.sh` 现在用那枚戳判阶段 1 —— 这才让在 `task+0x778` 上做 `ROUNDS>1` 重试有意义，
+因为失败的 round 变成**可读**的而不是靠推断 —— 而且阶段 1 没落地就**不发**阶段 2。
 
 完整推导：[`evidence/2026-09-18-divergence-is-latent.md`](evidence/2026-09-18-divergence-is-latent.md)
 与 [`evidence/2026-09-18-cred-launder-verification.md`](evidence/2026-09-18-cred-launder-verification.md)
@@ -478,12 +563,30 @@ run.sh                    设备侧运行编排（跨重启重试）
 「两枪写同一个值」，不是「两枪都落地」。
 
 [`postreboot_forensics.sh`](postreboot_forensics.sh) —— **不依赖 poller** 的重启后取证。
-本机 `CONFIG_PSTORE_RAM/CONSOLE=y` ⇒ panic 会把 console 尾部留在 ramoops 里跨复位存活；
-而 `CONFIG_PANIC_TIMEOUT=-1` ⇒ `panic()` **不自动重启** —— 所以「干净的 `bootreason=reboot`」
-与「panic」是**互斥**的两种读数。脚本 pull `/sys/fs/pstore/`、grep `kernel BUG` / `__put_cred` / `cred.c`、
+判据是**单条件**：`CONFIG_PSTORE_CONSOLE=y` ⇒ `panic()` 在
+`kmsg_dump(KMSG_DUMP_PANIC)` 那一刻就把 console 尾部写进 ramoops —— **发生在任何复位之前** ——
+所以机器之后是重启还是挂住**都无关**。脚本 pull `/sys/fs/pstore/`、grep `kernel BUG` / `__put_cred` / `cred.c`、
 打出 boot reason 的**字符串**（历史上出现过 `reboot,shell` / `bootloader` / `reboot,edl` 后缀，
-所以 reason 能区分执行者，epoch 不能），并检查 ramoops 保留区是否真的注册了 ——
-只下它**有权下**的结论。
+所以 reason 能区分执行者，epoch 不能）。
+
+> ⚠ **不要把「干净的 `bootreason=reboot`」读成「没有 panic」。** QCOM 上 SoC 看门狗 assert
+> 之后正是经 **PMIC PON 块**复位，所以
+> `panic → panic_timeout=-1 → 挂住 → 看门狗 → PMIC 复位 → 干净的 bootreason`
+> 是一条**自洽**的链路，在现有证据下与「PMIC/硬件复位」**不可区分**。
+> 本仓库自己拿到的 `total_17_dump_0_pmic_17` 把 17 次异常重启全部归因 `pmic` ——
+> 而那正是看门狗复位的常规外形，**不是**「与内核无关」的证据。
+> `bootreason` 在这里**收窄不了任何东西**；**ramoops 是唯一判据。**
+
+两个前提，否则脚本的结论作废（铁律 8 —— 无信号类结论必须先证明通道可达）：
+
+- **必须有第三态。** `/sys/fs/pstore/*` 是 root-only，Enforcing 下 `adb pull` 与 `cat` **都会失败** ——
+  而「读不到」与「读到且为空」**输出完全相同**。两态脚本会从一个**从未打开过的通道**里
+  打印出「pstore 为空 ⇒ 证伪 panic」。因此脚本会给出 **`CHANNEL UNREACHABLE`**
+  （ls 失败，或已知条目全是「读失败」而非「不存在」），并同时报告 `getenforce`。
+- **先做 null test。** 干净 `adb reboot` + 立刻取一次。若一次已知良好的重启都取不到可读内容，
+  通道就没被证明，之后**所有**「空 pstore」都不算证据。
+  **顺序要紧**：设备开机后不久就会把记录搬走并 unlink，所以流程是
+  *重启 → 立刻 W1 拿 Permissive → 立刻跑脚本*。
 
 [`run_bootA.sh`](run_bootA.sh) —— 那一次 boot 的编排，顺序是要紧的
 （`0x778` → `0x780` **用同一个值** → 对**真正被装上**的那个 cred 做本地修复 → 确认 → 才 poke）。

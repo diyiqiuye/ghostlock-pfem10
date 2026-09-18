@@ -30,10 +30,16 @@ GhostLock (CVE-2026-43499) port for the OPPO Find X5 Pro on ColorOS 16. Reaches 
 | Compact waiter trigger (`CMP_REQUEUE_PI` → `EDEADLK`) | works |
 | `task_struct` leak (perf) | works |
 | PI write (8-byte; value = `0` or a valid kernel address) | works |
-| `task+0x778` / `task+0x780` → `Uid=root` | works — but a single-field landing leaves the task divergent; see [the divergence hazard](#-a-single-field-landing-leaves-the-task-divergent--and-that-is-a-hard-bug_on) |
+| `task+0x778` **or** `task+0x780` alone → `Uid=root` | works — **but a single-field landing leaves the task divergent**, and that is a latent hard `BUG_ON`. See [the divergence hazard](#-a-single-field-landing-leaves-the-task-divergent--and-that-is-a-hard-bug_on) |
+| **Both fields written with ONE value** (a consistent pair) | ❌ **never produced with a sprayed page.** Only ever observed with the global `init_cred` alias (09-14, `CONTROL=1`). The runner now enforces it (`SAME_VALUE=1`); **not run on device** |
 | Credential laundering (`setresgid` + `setresuid`) | implemented behind `V12_LAUNDER=1`; **not run on device** |
 | `kernelsu.ko` loaded | works |
 | Root process survives | ⚠ **not established** — see below |
+| Reboot mechanism | ❌ **not established.** One candidate (the divergence) is now *excluded*; see below |
+| `probe_state` as a landing criterion | ❌ **wrong — do not use.** Three counterexamples; see the table below |
+| pstore/ramoops panic channel | ⚠ instrument exists; **channel never validated** (no null test yet) |
+| "The victim spins in pure userspace" | ⚠ **no reading yet** — `uid.stream` now records `utime`/`stime`/`nvcsw` so it can be checked |
+| pi-side single-pass dual write | ⚠ **not established**; `pi.pc`/`pi.left` are hard-coded 0 in `fdset_map.h` |
 | Path A (UMH / `modprobe_path`) | `STATIC_USERMODEHELPER_PATH=""` |
 
 On "root process survives": the runs in [`evidence/kill.log`](evidence/kill.log)
@@ -81,19 +87,56 @@ later run's state is not attributed. See [`evidence/notes.md`](evidence/notes.md
 
 ```
 LT          perf leak target task_struct → file
-W7 stage 1  task+0x778 = cred_page  (real_cred → private sprayed cred)
-W7 stage 2  task+0x780 = cred_page  (cred)
-W7 stage 3  cred_page+8 = 0         (LOCAL repair, second process, ZERO shape)
+W7 stage 1  task+0x778 = V    (real_cred → private sprayed page; V observed)
+W7 stage 2  task+0x780 = V    (cred)   ★ V12_W7_VALUE=V — THE SAME VALUE, not a new page
+W7 stage 3  V+8 = 0           (LOCAL repair of the page that was installed, ZERO shape)
 LT child    fexecve(memfd of loader) — no execve of a /data path
 loader      ksud late-load                  → kernelsu ... Live
 ```
 
+**Stage 2 must be given stage 1's value explicitly.** Stages 1 and 2 are two
+independent processes, each with its own spray, so "write the cred page to both
+slots" is a trap: read naively it produces `(pageA, pageB)`, and because
+`commit_creds` compares **pointers**, that pair is divergent even when both writes
+land. This is not hypothetical — it is exactly what runs 3 and 9 did:
+
+```
+run 9   0x778 shot  write value = 0xffffff88679bade0
+        0x780 shot  write value = 0xffffff8785d6ade0     <- a different page
+run 3   0x778 shot  write value = 0xffffff8787b5ade0
+        0x780 shot  write value = 0xffffff881bad2de0     <- a different page
+```
+
+`run_bootA.sh` therefore fires stage 2 with `V12_W7_VALUE=<stage 1's observed
+value>` and **refuses to fire it at all** if that value cannot be recovered.
+`HOLD` must outlive stage 2, or stage 1's page is freed and reallocated and "the
+same value" becomes a dangling pointer. See
+[the same-value rule](#-the-two-shots-must-write-the-same-value--not-merely-both-land).
+
+**One page per boot gets repaired.** Stage 3 zeroes `V+8`. With two *different*
+pages, zeroing both would erase the gid/suid stamp (below) and make a divergence
+look like agreement, so the runner repairs only the page that was actually
+installed and stops if the two values disagree.
+
 The cred page is built by `payload.c`: all eight id fields zero, all five
 capability sets full, and `user` / `user_ns` / `group_info` pointed at
-`root_user` / `init_user_ns` / `init_groups`. It is **never** the global
-`init_cred` — see "The write primitive, and its side effect" below for why that
-matters, and note that stage 3 exists because the write's side effect always
-clobbers `cred+8` (`gid`/`suid`) of whatever cred it installs.
+`root_user` / `init_user_ns` / `init_groups`. Stage 3 exists because the write's
+side effect always clobbers `cred+8` (`gid`/`suid`) of whatever cred it installs.
+
+### On `init_cred` — an explicit dichotomy
+
+Two sections here used to contradict each other ("never the global `init_cred`"
+vs "`CONTROL=1` reproduces cell 2", and cell 2 *is* `init_cred`). Both statements
+are true of different roles:
+
+* **Forbidden as a target.** Writing the `init_cred` pointer makes the side effect
+  corrupt `init_cred+8` **globally** — `init_cred` is shared by every kernel
+  thread, and `Uid: 0 0 4294967176 0` is precisely that corruption. The code
+  refuses this path unless `V12_ALLOW_INIT_CRED=1` is set deliberately.
+* **Retained as the only PROVEN consistent pair.** The 09-14 chain that reached
+  ksud wrote one fixed address (`0xffffff802a7e0be0`) to both slots, so
+  `real_cred == cred` by construction — that is why it survived to `execve`.
+  `CONTROL=1` reproduces it. It is a **control**, not a configuration to build on.
 
 perf leak: `PERF_TYPE_SOFTWARE` / `PERF_COUNT_SW_CPU_CLOCK`, `PERF_SAMPLE_REGS_INTR`, `exclude_user=1`.
 Accept `[0xffffff8400000000, 0xffffff90000000)`, votes ≥ 15%.
@@ -256,6 +299,61 @@ stands: the side effect corrupts `init_cred+8` globally, which is what
   Either check failing ⇒ refuse, and the four-case table goes into the evidence.
   The LT report line prints both views (`uid=` / `real_uid=` / `consistent=`) plus
   `same_value_declared=` so the state is read, not inferred.
+
+### ★ Instrument 1 — the side effect is a STAMP aimed at the target
+
+`*(write_value + 8) = write_target`, and `cred+8` / `cred+0xc` are `gid` / `suid`,
+so one 8-byte store lands across both:
+
+```
+cred.gid  = low32(write_target)
+cred.suid = hi32(write_target)
+```
+
+That is a measurement, not a model. `out/t5_w7_778.txt` has
+`write_target = 0xffffff8800cdd178` and `Uid: 0 0 4294967176 0`, where
+`4294967176 = 0xffffff88 = hi32(write_target)`; `notes.md` §11 records the other
+half, `init_cred.gid = 0x00cdd178 = low32(write_target)`.
+
+Two uses:
+
+1. **It is the landing oracle for `task+0x778`.** `/proc/<pid>/status` reads
+   `real_cred` = `task+0x778` — exactly the cred just installed — so the stamp is
+   directly readable from userspace. Read it **before** stage 3: the repair
+   zeroes `cred+8` and erases it (`notes.md` §11's `t5_repair.txt` reads
+   `4294967176` before a successful repair and `0` after).
+2. **It is a second, independent reason the launder gate can catch two different
+   pages.** The uid half alone cannot: any page with uid 0 reads `0`, so two
+   distinct pages both report "consistent". But `low32(T+0x778)` and
+   `low32(T+0x780)` differ by exactly 8, so with two pages `getgid()` (from
+   `cred`) and `status_gid` (from `real_cred`) disagree — and
+   `lt_cred_ids_agree()` compares gid as well as uid.
+
+⇒ `V12_W7_SAME_VALUE` is the **second** gate, not the only one. It still matters:
+the stamp only discriminates if both side effects fired, so the same-value rule
+closes that residual hole. And note what a gate *is* — a detector, not a
+preventer. It can only refuse; it leaves the task divergent for the rest of the
+boot. The same-value rule is what makes the pair **correct**, which is what the
+old chain had and what is needed to reach `execve` at all.
+
+### ★ Instrument 2 — `probe_state` is NOT a landing criterion
+
+It has been wrong three times in this project: W1 landed on the global and
+reported `R`; run 12's `D` was aimed at a global rather than at a cred; and run
+11's `R` was written into a table as if it were a landing
+(`run11_w778r1_miss.txt` and run 7's `w7_w7781.txt` are line-for-line
+isomorphic — both `probe_state = R`, `probe_done = 0`). Use a per-target oracle:
+
+| target | landing oracle |
+|---|---|
+| `task+0x778` | `Uid:` 3rd field `= hi32(write_target)` **and** `Gid:` 1st field `= low32(write_target)` — the stamp above; **read before stage 3** |
+| `task+0x780` | the victim's own `getuid()` |
+| global `selinux_enforcing` | `getenforce` |
+| `probe_state` | ❌ **not a criterion.** A hint about the chain at best; never evidence that a write landed |
+
+`run_bootA.sh` now uses the stamp for stage 1 — which is what makes `ROUNDS>1`
+retries on `task+0x778` meaningful, since a failed round is *readable* instead of
+inferred — and it will not fire stage 2 unless stage 1 landed.
 
 Full derivation: [`evidence/2026-09-18-divergence-is-latent.md`](evidence/2026-09-18-divergence-is-latent.md)
 and [`evidence/2026-09-18-cred-launder-verification.md`](evidence/2026-09-18-cred-launder-verification.md)
@@ -546,14 +644,37 @@ pages. So the criterion is pointer equality — "both shots write the same value
 not "both shots land".
 
 [`postreboot_forensics.sh`](postreboot_forensics.sh) — reboot forensics that does
-**not** depend on the poller. `CONFIG_PSTORE_RAM/CONSOLE=y` means a panic leaves
-the console tail in ramoops across a reset, and `CONFIG_PANIC_TIMEOUT=-1` means
-`panic()` does *not* auto-reboot — so a clean `bootreason=reboot` and a panic are
-mutually exclusive readings. Pulls `/sys/fs/pstore/`, greps for `kernel BUG` /
-`__put_cred` / `cred.c`, prints the boot-reason **string** (history entries have
-carried `reboot,shell` / `bootloader` / `reboot,edl` suffixes, so the reason
-distinguishes an actor where the epoch does not), and checks whether the ramoops
-region is actually registered so it only claims the verdict it is entitled to.
+**not** depend on the poller. The criterion is a single condition:
+`CONFIG_PSTORE_CONSOLE=y` makes `panic()` write the console tail into ramoops at
+`kmsg_dump(KMSG_DUMP_PANIC)` — **before any reset** — so whether the box then
+reboots or hangs is irrelevant. Pulls `/sys/fs/pstore/`, greps for `kernel BUG` /
+`__put_cred` / `cred.c`, and prints the boot-reason **string** (history entries
+have carried `reboot,shell` / `bootloader` / `reboot,edl` suffixes, so the reason
+distinguishes an actor where the epoch does not).
+
+> ⚠ **Do not read "clean `bootreason=reboot`" as "no panic."** On QCOM an SoC
+> watchdog assert is reset through the PMIC PON block, so
+> `panic → panic_timeout=-1 → hang → watchdog → PMIC reset → clean bootreason`
+> is a self-consistent chain that is **indistinguishable** from a hardware reset
+> on the evidence we hold. This repo's own `total_17_dump_0_pmic_17` attributes
+> all 17 abnormal reboots to `pmic`, which is exactly the watchdog's normal
+> shape, not evidence of "not the kernel." `bootreason` narrows nothing here;
+> **ramoops is the only criterion.**
+
+Two preconditions, or the script's verdict is void (铁律 8 — a no-signal
+conclusion requires the channel to be proven reachable first):
+
+- **Third state required.** `/sys/fs/pstore/*` is root-only, so under Enforcing
+  both `adb pull` and `cat` fail — and "cannot read" produces the *same output*
+  as "read it and it was empty". A two-state script prints "pstore is EMPTY ⇒
+  panic disproven" from a channel it never opened. The script therefore emits
+  **`CHANNEL UNREACHABLE`** (ls failed, or all known entries failed to *read*
+  rather than not existing) and reports `getenforce` alongside.
+- **Null test first.** A clean `adb reboot` followed by an immediate fetch. If a
+  known-good reboot yields nothing readable, the channel is not proven and every
+  later "empty pstore" is not evidence. **Ordering matters**: the device moves
+  and unlinks the record shortly after boot, so the sequence is
+  *reboot → get Permissive (W1) → run the script immediately*.
 
 [`run_bootA.sh`](run_bootA.sh) — orchestration for that one boot, in the order
 that matters (`0x778` → `0x780` **with the same value** → local repair of the cred
