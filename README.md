@@ -175,7 +175,7 @@ Uid:	0	0	4294967176	0
 `write_value` was the `init_cred` alias and `write_target` was `child_task+0x778`.
 `init_cred+8` is `gid`/`suid`, so the side effect stored `0xffffff8800cdd178`
 there: `init_cred.gid = 0x00cdd178` and **`init_cred.suid = 0xffffff88 =
-4294967176`** — precisely the third field of the `Uid:` line above. Zeroing
+4294967176`** — precisely the 4th awk field of the `Uid:` line above. Zeroing
 `init_cred+8` repaired it (`out/t5_repair.txt`: `Uid: 0 0 4294967176 0` →
 `Uid: 0 0 0 0`), which is all that "W7 stage 3" ever was.
 
@@ -346,7 +346,7 @@ isomorphic — both `probe_state = R`, `probe_done = 0`). Use a per-target oracl
 
 | target | landing oracle |
 |---|---|
-| `task+0x778` | `Uid:` 3rd field `= hi32(write_target)` **and** `Gid:` 1st field `= low32(write_target)` — the stamp above; **read before stage 3** |
+| `task+0x778` | `Uid:` **4th awk field** `= hi32(write_target)` **and** `Gid:` **2nd awk field** `= low32(write_target)` — the stamp above; **read before stage 3** |
 | `task+0x780` | the victim's own `getuid()` |
 | global `selinux_enforcing` | `getenforce` |
 | `probe_state` | ❌ **not a criterion.** A hint about the chain at best; never evidence that a write landed |
@@ -354,6 +354,40 @@ isomorphic — both `probe_state = R`, `probe_done = 0`). Use a per-target oracl
 `run_bootA.sh` now uses the stamp for stage 1 — which is what makes `ROUNDS>1`
 retries on `task+0x778` meaningful, since a failed round is *readable* instead of
 inferred — and it will not fire stage 2 unless stage 1 landed.
+
+> ⛔ **Say "awk field", never "3rd field".** `uid_line` prints the label too
+> (`Uid: 0 0 4294967176 0`), so awk's `$1` is `"Uid:"` and the four id values are
+> `$2..$5`: `$2`=uid `$3`=euid **`$4`=suid** `$5`=fsuid. The stamp sits at
+> `cred+8`, i.e. `gid` (low32) and `suid` (hi32) — so it is `Gid:` `$2` and
+> `Uid:` **`$4`**. Calling it "the third field" (which counts *values*, and is how
+> `notes.md` §11 words it) invites the code to read `$3`, which is `euid` = `0` on
+> the fake cred and can never equal `hi32(write_target)`. That off-by-one was
+> present here: `stamp_ok()` returned "no stamp" for a shot that landed, so stage 2
+> never fired and the launder gate refused forever — **with no error anywhere**,
+> because "no stamp" is also the normal result of a genuine miss.
+
+**A criterion that is never tested against a known-positive sample is not a
+criterion, it is a guess** — and this class of failure (this off-by-one,
+`probe_state`, `dmesg -w`, the empty `klog.host`, the blank readback) always
+presents as *"nothing happened"*, which is also a legitimate experimental outcome.
+So the check is now defended twice:
+
+* **`stamp_selftest()`** runs in preflight and `exit 9`s on failure, driving the
+  *same* extraction functions the gate uses against the measured values from
+  `out/t5_w7_778.txt` (`write_target = 0xffffff8800cdd178` → `Uid` `$4` =
+  `4294967176`, `Gid` `$2` = `13488504`) plus negative and unreadable samples.
+  A self-test that re-implements the check proves nothing, so the field
+  extraction is factored into `uid_suid_field` / `gid_gid_field`.
+* **[`tools/test_stamp_criterion.sh`](tools/test_stamp_criterion.sh)** — the
+  same thing as a standalone regression test, extracting the real functions out
+  of `run_bootA.sh`.
+
+`stamp_ok()` returns **three** states, because "cannot read" is not "no stamp"
+(that conflation is what made run 13 look like "no change"): `0` = present,
+`1` = readable and no stamp, `2` = **UNREADABLE**. And when it returns `1` while
+`probe_state = D`, the runner prints **⛔ ORACLE INCONSISTENT** — "go check the
+criterion" — instead of the "did not land" message, which sends the operator to a
+completely different place (a fresh boot, or a hit-rate hunt).
 
 Full derivation: [`evidence/2026-09-18-divergence-is-latent.md`](evidence/2026-09-18-divergence-is-latent.md)
 and [`evidence/2026-09-18-cred-launder-verification.md`](evidence/2026-09-18-cred-launder-verification.md)
@@ -589,6 +623,9 @@ model/                    model.c — host-side rtmutex chain-walk model
 tools/                    kdis.py  kdis_ko.py  kdis_ko_reloc.py  gen_guard_disasm.py
                           gen_exempt_table.py  mod_layout.py  sct_dump.py
                           find_task_off.py  slide_resolve.py
+                          test_stamp_criterion.sh   regression test for the 0x778
+                                                    landing criterion (run it after
+                                                    touching uid_line/gid_line)
 artifacts/                guard_post_handler.s   kill chain, relocations resolved
                           guard_relocs.txt       raw .text relocation dump
                           guard_disasm.txt       guard + heap-spray detector
@@ -682,6 +719,15 @@ that was actually installed → confirm → only then poke). `ADB=`/`SER=`/
 `BIN_LOCAL=` overridable; `SAME_VALUE=1` (default) enforces the same-value rule,
 `CONTROL=1` reproduces the old `init_cred` cell, `LAUNDER=1` enables the gated
 launder, `HOLD=600` is required for the same-value sequence.
+
+**Both streams start before the thing they measure.** `uid.stream` runs from
+stage 1; `cred.stream` starts **at the poke**, not after the watch — the poke
+releases the child into its NO_EXEC report loop, which is 240 × 0.5 s = 120 s and
+then `_exit(0)` (`exploit.c`: "LT child NO-EXEC mode done (120s)"), so the old
+placement at t+~135 s started sampling after the child was already gone, at
+exactly the window the instrument exists for. The runner also refuses to proceed
+if `stamp_selftest()` fails, and prints **ORACLE INCONSISTENT** rather than "did
+not land" when the stamp and `probe_state` disagree.
 
 [`artifacts/guard_post_handler.s`](artifacts/guard_post_handler.s) — the kill
 chain with relocations filled in. `adrp x9, #0` in the older listings is

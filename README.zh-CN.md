@@ -303,13 +303,39 @@ run 11 的 `R` 被当成落地写进了表格（`run11_w778r1_miss.txt` 与 run 
 
 | 目标 | 落地判据 |
 |---|---|
-| `task+0x778` | `Uid:` 第 3 字段 `= hi32(write_target)` **且** `Gid:` 第 1 字段 `= low32(write_target)` —— 即上面那枚戳；**在阶段 3 之前读** |
+| `task+0x778` | `Uid:` **第 4 个 awk 字段** `= hi32(write_target)` **且** `Gid:` **第 2 个 awk 字段** `= low32(write_target)` —— 即上面那枚戳；**在阶段 3 之前读** |
 | `task+0x780` | 受害者自报的 `getuid()` |
 | 全局 `selinux_enforcing` | `getenforce` |
 | `probe_state` | ❌ **不是判据。** 顶多是链的一个提示；**永远不是**「写落地了」的证据 |
 
 `run_bootA.sh` 现在用那枚戳判阶段 1 —— 这才让在 `task+0x778` 上做 `ROUNDS>1` 重试有意义，
 因为失败的 round 变成**可读**的而不是靠推断 —— 而且阶段 1 没落地就**不发**阶段 2。
+
+> ⛔ **必须说「awk 字段」，永远别说「第 3 个字段」。** `uid_line` 把标签也打出来
+> （`Uid: 0 0 4294967176 0`），所以 awk 的 `$1` 是 `"Uid:"`，四个 id 值在 `$2..$5`：
+> `$2`=uid `$3`=euid **`$4`=suid** `$5`=fsuid。戳落在 `cred+8`，即 `gid`（low32）与
+> `suid`（hi32）—— 所以是 `Gid:` 的 `$2` 和 `Uid:` 的 **`$4`**。说成「第三个字段」
+> （按**值**计数，`notes.md` §11 就是这么写的）会诱使代码去读 `$3`，而那是 `euid`，
+> 在假 cred 上恒为 `0`，**永远**不等于 `hi32(write_target)`。这个差一错误**真的发生过**：
+> `stamp_ok()` 对**已经落地**的一枪报「没有戳」⇒ 阶段 2 永不发火、洗白门永远拒绝 ——
+> 而**全程没有任何报错**，因为「没有戳」也正是一次真实 miss 的正常结局。
+
+**从未拿已知正样本验证过的判据不是判据，是猜测** —— 而这一类故障（这个差一、
+`probe_state`、`dmesg -w`、空的 `klog.host`、空回读）**全都表现为「什么都没发生」**，
+而「什么都没发生」恰好也是一个合法的实验结局。所以现在有两道防线：
+
+* **`stamp_selftest()`** 在 preflight 里跑，失败即 `exit 9`；它驱动的是**门本身用的同一套**
+  抽取函数，样本取自 `out/t5_w7_778.txt` 的**实测值**（`write_target = 0xffffff8800cdd178`
+  ⇒ `Uid` `$4` = `4294967176`、`Gid` `$2` = `13488504`），外加负样本与不可读样本。
+  **重新实现一遍判据的自检什么也证明不了**，所以字段抽取被抽成 `uid_suid_field` /
+  `gid_gid_field`。
+* **[`tools/test_stamp_criterion.sh`](tools/test_stamp_criterion.sh)** —— 同一件事的
+  独立回归测试，直接从 `run_bootA.sh` 里抽真函数来跑。
+
+`stamp_ok()` 返回**三态**，因为「读不到」不是「没有戳」（正是这个混淆让 run 13 看起来像
+「没变化」）：`0` = 有戳，`1` = 可读但没有戳，`2` = **不可读**。而当它返回 `1` 且
+`probe_state = D` 时，runner 会打印 **⛔ ORACLE INCONSISTENT**（「去查判据」），
+而不是「没落地」那句话 —— 后者会把人引向完全不同的地方（换一个 boot，或者去查命中率）。
 
 完整推导：[`evidence/2026-09-18-divergence-is-latent.md`](evidence/2026-09-18-divergence-is-latent.md)
 与 [`evidence/2026-09-18-cred-launder-verification.md`](evidence/2026-09-18-cred-launder-verification.md)
@@ -521,6 +547,8 @@ model/                    model.c —— 宿主机侧 rtmutex 链遍历模型
 tools/                    kdis.py  kdis_ko.py  kdis_ko_reloc.py  gen_guard_disasm.py
                           gen_exempt_table.py  mod_layout.py  sct_dump.py
                           find_task_off.py  slide_resolve.py
+                          test_stamp_criterion.sh   0x778 落地判据的回归测试
+                                                    （动过 uid_line/gid_line 就跑它）
 artifacts/                guard_post_handler.s   击杀链，重定位已填
                           guard_relocs.txt       `.text` 重定位原始 dump
                           guard_disasm.txt       guard + 堆喷探测器
@@ -593,6 +621,13 @@ run.sh                    设备侧运行编排（跨重启重试）
 `ADB=`/`SER=`/`BIN_LOCAL=` 可覆盖；`SAME_VALUE=1`（默认）强制同值规则，
 `CONTROL=1` 复现旧的 `init_cred` cell，`LAUNDER=1` 打开带门的洗白，
 同值序列**必须** `HOLD=600`。
+
+**两条流都在它们要测量的东西开始之前启动。** `uid.stream` 从阶段 1 就跑；
+`cred.stream` **在 poke 那一刻**启动，而不是等 watch 之后 —— poke 会把子进程放进它的
+NO_EXEC 自报循环，那是 240 × 0.5 s = 120 s，然后 `_exit(0)`（`exploit.c`：
+"LT child NO-EXEC mode done (120s)"）；旧位置在 t+~135 s，等于在子进程已经消失之后才开始采样，
+而那正是这个仪器存在的意义所在的窗口。此外 runner 在 `stamp_selftest()` 失败时拒绝继续，
+并在戳与 `probe_state` 冲突时打印 **ORACLE INCONSISTENT** 而不是「没落地」。
 
 [`artifacts/guard_post_handler.s`](artifacts/guard_post_handler.s) —— 重定位已填的击杀链。
 旧清单里的 `adrp x9, #0` 其实是 `.data..ro_after_init`，`bl #0x4ac` 是 `oplus_root_check_succ`。
