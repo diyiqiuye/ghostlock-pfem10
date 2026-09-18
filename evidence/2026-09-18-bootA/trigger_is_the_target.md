@@ -10,11 +10,37 @@
 | # | `write_target` | `write_value` | landed | reboot | evidence |
 |---|---|---|---|---|---|
 | 1 | global `selinux_enforcing` | `base+0x100` (own sprayed page) | yes | **no** | W1 rounds of runs 10, 11, 12; run 12's W7 pass with `MIMIC_W1` |
-| 2 | `task+0x778` | **`init_cred` P0 alias (permanent)** | yes | **no** | `out/t5_w7_778.txt` (09-14): the run continued through ksud late-load, `kernelsu ... Live`, manager alive 120 s |
-| 3 | `task+0x778` / `task+0x780` | **`g_cred_copy_addr` (sprayed page)** | yes | **YES** | runs 9 (`0x780`), 10 (`0x778`) |
+| 2 | `task+0x778` **and** `task+0x780` | **`init_cred` P0 alias — THE SAME VALUE BOTH TIMES** | yes | **no** | `out/t5_w7_778.txt` + `out/t5_w7_780.txt` (09-14): both carry `in[0]=0xffffff802a7e0be0`; the run continued through ksud late-load, `kernelsu ... Live`, manager alive 120 s |
+| 3 | `task+0x778` / `task+0x780` | **two DIFFERENT sprayed pages** | yes | **YES** | run 3 (`0xffffff8787b5ade0` vs `0xffffff881bad2de0`), run 9 (`0xffffff88679bade0` vs `0xffffff8785d6ade0`), run 10 |
 
 **Cells 2 and 3 have the same target and the same landing. The only thing that
 differs is the identity of `write_value`.**
+
+### ★★★ and that difference is sharper than "which value": it is POINTER EQUALITY
+
+`commit_creds()` opens with `BUG_ON(task->cred != task->real_cred)` and this
+kernel has `PANIC_ON_OOPS=y`, so the two pointers must be **the same pointer**
+when anything commits creds on the victim.  The comparison is on POINTERS, not
+on the uid numbers behind them.
+
+* **Cell 2 wrote one fixed address to both slots** ⇒ `real_cred == cred` ⇒ any
+  later `commit_creds` (e.g. `execve` → `install_exec_creds`) is legal ⇒ ksud
+  loads.  The old chain got this **by construction**: `tools/t5loop.sh` applies
+  a single `$ENVV` to every offset, so `MODE=CRED` made both shots identical.
+* **Cell 3 wrote two different pages** ⇒ even with both landed,
+  `real_cred = pageA, cred = pageB` ⇒ divergent.  `run_bootA.sh` produced this
+  unavoidably: step 5 and step 6 each fired with an empty `$extra`, so each
+  sprayed its own page.
+
+⇒ **The requirement is not "both shots land", it is "both shots write the SAME
+value".**  `run_bootA.sh` now enforces this (`SAME_VALUE=1`, the default): step 6
+reuses step 5's observed `write_value` verbatim, and refuses to fire at all if it
+cannot recover that value.
+
+⚠ **`HOLD` must outlive the second shot.**  If the first shot's PIN child dies
+before step 6 fires, the page is freed and reallocated and "same value" becomes a
+dangling pointer.  The default `HOLD=20` is **too short** for this sequence — use
+`HOLD=600`.
 
 Cell 2's landing is not an assumption — the side-effect fingerprint is in the
 capture:
@@ -81,15 +107,59 @@ mechanism is power/hardware rather than a kernel fault path.
 
 Shape A at `CHAINWAIT=4000` is a low-information cell — shape A has never
 rebooted at 20000 or 6000, and 4000 only makes the pass return early. The
-high-information cell is **cell 2**, which the code already supports:
+high-information cell is **cell 2**, which the code now actually supports:
 
 ```bash
 CONTROL=1 HOLD=600 ROUNDS=1 CHAINWAIT=6000 NODRAIN=1 WATCH=180 ./run_bootA.sh
 ```
 
-* lands and does not reboot within 180 s ⇒ the lifetime reading holds, and it
-  forms a perfect single-variable pair with cell 3;
-* lands and still reboots ⇒ the target slot itself is the trigger and the
-  lifetime reading is out.
+* lands and does not reboot within 180 s ⇒ it forms a single-variable pair with
+  cell 3 and the same-value reading holds;
+* lands and still reboots ⇒ the target slot itself is the trigger.
 
 **Instruments first**, or it is another "landed but nobody looked".
+
+### ⛔ Correction (2026-09-18 late): `CONTROL=1` did NOT do what this file claimed
+
+This section used to say cell 2 "is supported by the code already". It was not.
+`CONTROL=1` only changed **step 5**; step 6 still fired with an empty `$extra`
+and sprayed its own fresh page:
+
+```
+step 5 (0x778) → init_cred alias
+step 6 (0x780) → a NEW private page          ← not init_cred
+⇒ real_cred != cred ⇒ divergent pair, and step 8 pokes
+⇒ any commit_creds after that is brk #0x800 under PANIC_ON_OOPS=y
+```
+
+So running the command above **as it was written would have manufactured the
+divergent pair and then poked it**.  Fixed: `CONTROL=1` now sets both shots to
+`V12_ALLOW_INIT_CRED=1 V12_W7_INIT_CRED=1` and logs
+`[same-value] step 6 will reuse the init_cred image`.
+
+⚠ Cell 2 works at a cost that must not be forgotten: writing the `init_cred`
+pointer makes the write primitive's side effect corrupt `init_cred+8` **globally**
+— `init_cred` is shared by every kernel thread, and the `Uid: 0 0 4294967176 0`
+in the capture *is* that corruption.  Cell 2 is a **control**, not a target.
+
+### ⛔ And a second correction: the divergence was NOT the reboot mechanism
+
+An intermediate revision of the sibling report
+(`delivery/验证_cred洗白与分歧_2026-09-18.md` §2.3) claimed the divergent pair
+explained runs 3/9/10.  It does not:
+
+* `commit_creds` gets its task from `current` (`0x1867a0 mrs x20, sp_el0`) — it
+  only ever acts on the calling task;
+* runs 3/9/10 all ran `V12_NO_EXEC=1`, so the victim never issued `execve` and
+  never reached `commit_creds` at all;
+* run 10 had no poke whatsoever;
+* `exit_creds` nulls BOTH pointers before `put_cred`, so the victim's `_exit(0)`
+  **erases** the divergence instead of tripping on it.
+
+⇒ The divergence was **latent** in those runs.  The `BUG_ON` is real but it is a
+landmine that has not gone off yet; what it actually constrains is **laundering**
+(`setresuid` itself calls `commit_creds`).  See
+`delivery/验证_分歧是惰性的_同值才是判据_2026-09-18.md`.
+
+**Instruments first** — and now also: `postreboot_forensics.sh` for the
+poller-independent panic check.

