@@ -30,7 +30,8 @@ GhostLock (CVE-2026-43499) port for the OPPO Find X5 Pro on ColorOS 16. Reaches 
 | Compact waiter trigger (`CMP_REQUEUE_PI` → `EDEADLK`) | works |
 | `task_struct` leak (perf) | works |
 | PI write (8-byte; value = `0` or a valid kernel address) | works |
-| `task+0x778` / `task+0x780` → `Uid=root` | works |
+| `task+0x778` / `task+0x780` → `Uid=root` | works — but a single-field landing leaves the task divergent; see [the divergence hazard](#-a-single-field-landing-leaves-the-task-divergent--and-that-is-a-hard-bug_on) |
+| Credential laundering (`setresgid` + `setresuid`) | implemented behind `V12_LAUNDER=1`; **not run on device** |
 | `kernelsu.ko` loaded | works |
 | Root process survives | ⚠ **not established** — see below |
 | Path A (UMH / `modprobe_path`) | `STATIC_USERMODEHELPER_PATH=""` |
@@ -149,6 +150,65 @@ location is a choice — and the repair is now a **local** zero of
 > seen in a run where `gid` and `egid` read back clean, so it cannot come from
 > the `init_cred+8` side effect; it points at the fake cred's own `group_info`
 > field. See `evidence/notes.md` §10.6.
+
+### ★ A single-field landing leaves the task divergent — and that is a hard `BUG_ON`
+
+The primitive stores to **exactly one** address per pass. `task+0x778`
+(`real_cred`) and `task+0x780` (`cred`) are two separate addresses, so **any
+landed 0x778-only or 0x780-only write leaves the task with
+`cred != real_cred`** — a divergence state.
+
+On this image that state is a **hard panic**, not a warning. `commit_creds` opens
+with `BUG_ON(task->cred != task->real_cred)`:
+
+```
+commit_creds @0xffffffc008186784
+  0x1867a4  ldr  x19, [x20, #0x778]      ; old = task->real_cred
+  0x1867a8  ldr  x8,  [x20, #0x780]      ;        task->cred
+  0x1867ac  cmp  x8, x19
+  0x1867b0  b.ne #0xffffffc008186b68
+  0x186b68  brk #0x800                   ; == BUG()
+```
+
+and the kernel is built with **`CONFIG_PANIC_ON_OOPS=y`** (`CONFIG_PANIC_ON_OOPS_VALUE=1`).
+`__put_cred @0xffffffc008185530` carries the same family of assertions
+(`usage != 0` → BUG; `cred == current->cred` / `current->real_cred` → BUG).
+
+So the divergence is *latent* — it does nothing while the victim just spins —
+until **any** `commit_creds` happens on that task: `setresuid` / `setresgid` /
+`setuid` / `setgid` / `capset`, or **`execve` via `install_exec_creds`**. The LT
+child reaches `execve` as its very next step after the report loop, which makes
+that the shortest route from a landed write to a panic.
+
+**This is the leading mechanism candidate for the reboots**, and it explains the
+otherwise-puzzling shape split: the `base+0x100` → global-`selinux_enforcing`
+shape never touches 0x778/0x780 at all, so it *cannot* create divergence — which
+is why it has never rebooted. It also predicts the one symmetric case that was
+observed: the run that landed **0x778** alone (not 0x780) also rebooted.
+
+**Consequences for anything that wants to launder the credential**
+(`setresgid` + `setresuid`, to swap the sprayed page for a real `struct cred`):
+
+- The mechanism is real and verified — `commit_creds` writes `x21` to **both**
+  `task+0x778` and `task+0x780` (`0x186998` / `0x1869a0`), so one call repairs the
+  split permanently; `prepare_creds @0xffffffc008186070` is
+  `kmem_cache_alloc(cred_jar)` + `memcpy(new, task->cred, 0xA8)` +
+  `security_prepare_creds(...)`, and 147/149 are both on the guard's exempt list.
+- **But its precondition is the opposite of "skip the 0x778 shot".** The launder
+  itself calls `commit_creds`, so it must only be issued when **both** pointers
+  already hold the same value. Doing it after a single-field landing converts a
+  latent divergence into an immediate panic.
+- `V12_LAUNDER=1` is therefore gated: it compares the `0x780` view (`getuid()`)
+  against the `0x778` view (`/proc/self/status` `Uid:`) and **refuses** when they
+  disagree. That check is necessary but not sufficient — two distinct objects can
+  carry equal ids — so the sound configuration remains "both fields written with
+  the same page". The LT report line now prints both views
+  (`uid=` / `real_uid=` / `consistent=`) so the state is read, not inferred.
+
+Full derivation, including the write-shape overlap self-check (closed offline:
+the shape words live in the fd_set grid on the kernel stack while the side effect
+lands inside the sprayed page, so the two cannot overlap in either shape):
+[`evidence/2026-09-18-cred-launder-verification.md`](evidence/2026-09-18-cred-launder-verification.md).
 
 ## Detection paths
 
@@ -401,13 +461,25 @@ recipe that would produce the missing kernel half; and a list of what is still
 open.
 
 [`evidence/2026-09-18-bootA/`](evidence/2026-09-18-bootA/README.md) — the first
-device run of the current design. Both attempts ended in an **orderly reboot**
-(`bootreason=reboot`, no panic) and **neither reached the credential write**, so
-the question it was meant to answer is still open. It also documents the
-methodology error worth knowing about: **`dmesg -w` is a no-op on this device**
-(toybox dumps once and exits), so that run's kernel log held only pre-capture
-history — "no `[ROOTCHECK-*]`" was not evidence of anything. `evidence/notes.md`
-§6 now carries the corrected poll-and-stream-to-host recipe.
+device run of the current design, 13 boots. The reboots are **orderly**
+(`bootreason=reboot`) and no panic line has ever been captured — **but read that
+as a sample of one, not thirteen.** Of the four runs that rebooted, two saved an
+empty `klog.host`, one saved the log of the *next* boot, and only one window can
+plausibly bracket its own reboot. Likewise, one run's `probe_state` and victim
+readback are both **empty** (the device was already gone), so it carries no
+information about whether its write landed — a blank field is not "no change".
+The directory also documents the methodology error worth knowing about:
+**`dmesg -w` is a no-op on this device** (toybox dumps once and exits), so an
+earlier run's kernel log held only pre-capture history — "no `[ROOTCHECK-*]`" was
+not evidence of anything. `evidence/notes.md` §6 carries the corrected
+poll-and-stream-to-host recipe.
+
+[`evidence/2026-09-18-cred-launder-verification.md`](evidence/2026-09-18-cred-launder-verification.md)
+— verification of the credential-laundering proposal against this image's own
+disassembly (not generic 5.10 source): the `commit_creds` double store, the
+`prepare_creds` allocation and measured `sizeof(struct cred) = 0xA8`, the
+`BUG_ON(cred != real_cred)` divergence hazard above, the closed write-shape
+overlap self-check, and the evidence-coverage audit of the 13 boots.
 
 [`run_bootA.sh`](run_bootA.sh) — orchestration for that one boot, in the order
 that matters (`0x778` → `0x780` → local repair of the cred that was actually

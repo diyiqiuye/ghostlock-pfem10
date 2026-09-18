@@ -30,7 +30,8 @@ GhostLock（CVE-2026-43499）针对 ColorOS 16 上 OPPO Find X5 Pro 的移植。
 | compact waiter 触发（`CMP_REQUEUE_PI` → `EDEADLK`） | 成功 |
 | `task_struct` 泄漏（perf） | 成功 |
 | PI 写原语（8 字节；值 = `0` 或合法内核地址） | 成功 |
-| `task+0x778` / `task+0x780` → `Uid=root` | 成功 |
+| `task+0x778` / `task+0x780` → `Uid=root` | 成功 —— 但**单字段落地会让任务进入分歧态**，见[分歧态那一节](#-单字段落地会让任务进入分歧态--而这是一条硬-bug_on) |
+| cred 洗白（`setresgid` + `setresuid`） | 已实现（`V12_LAUNDER=1`）；**未上机** |
 | `kernelsu.ko` 载入 | 成功 |
 | root 进程存活 | ⚠ **未定论** —— 见下 |
 | Path A（UMH / `modprobe_path`） | `STATIC_USERMODEHELPER_PATH=""` |
@@ -135,6 +136,56 @@ write_target。能选的只有它的**落点** —— 而修复现在是对 `cre
 
 > `groups=` 读出垃圾是**另一个**症状，不是这个。它出现在一次 `gid`/`egid` 回读**正常**的 run 里，
 > 所以不可能来自 `init_cred+8` 副作用；它指向假 cred 自己的 `group_info` 字段。见 `evidence/notes.md` §10.6。
+
+### ★ 单字段落地会让任务进入分歧态 —— 而这是一条硬 `BUG_ON`
+
+本原语**每趟只写一个地址**。`task+0x778`（`real_cred`）与 `task+0x780`（`cred`）是两个不同地址，
+所以**任何一次落地的 0x778-only 或 0x780-only 写入，都会让任务留下 `cred != real_cred`** —— 分歧态。
+
+在本镜像上，这个状态是**硬 panic**，不是警告。`commit_creds` 开头就是
+`BUG_ON(task->cred != task->real_cred)`：
+
+```
+commit_creds @0xffffffc008186784
+  0x1867a4  ldr  x19, [x20, #0x778]      ; old = task->real_cred
+  0x1867a8  ldr  x8,  [x20, #0x780]      ;        task->cred
+  0x1867ac  cmp  x8, x19
+  0x1867b0  b.ne #0xffffffc008186b68
+  0x186b68  brk #0x800                   ; == BUG()
+```
+
+而本内核编了 **`CONFIG_PANIC_ON_OOPS=y`**（`CONFIG_PANIC_ON_OOPS_VALUE=1`）。
+`__put_cred @0xffffffc008185530` 还有同族断言（`usage != 0` → BUG；
+`cred == current->cred` / `current->real_cred` → BUG）。
+
+所以分歧态是**潜伏**的 —— 受害者进程只是自旋时什么都不会发生 —— 直到该任务上发生**任何**
+`commit_creds`：`setresuid` / `setresgid` / `setuid` / `setgid` / `capset`，
+或者 **`execve`（经 `install_exec_creds`）**。LT 子进程报告循环之后的下一步正好就是 `execve`，
+这让它成为「写落地 → panic」之间最短的一条路。
+
+**这是目前重启机制的头号候选**，而且它解释了此前说不清的 shape 分界：
+`base+0x100` → 全局 `selinux_enforcing` 那种形状**根本不碰** 0x778/0x780，
+所以**不可能**制造分歧 —— 这正是它从不重启的原因。它也预测了唯一被观测到的对称情形：
+那次**只落地 0x778**（而非 0x780）的 run 同样重启了。
+
+**对任何想洗白 cred 的方案（`setresgid` + `setresuid`，把喷页换成真正的 `struct cred`）的后果：**
+
+- 机制是真的、已核实 —— `commit_creds` 把 `x21` 写进 **`task+0x778` 和 `task+0x780` 两处**
+  （`0x186998` / `0x1869a0`），所以一次调用就永久修好分裂；`prepare_creds @0xffffffc008186070`
+  = `kmem_cache_alloc(cred_jar)` + `memcpy(new, task->cred, 0xA8)` + `security_prepare_creds(...)`；
+  147/149 都在看门狗豁免表内。
+- **但它的前提与「跳过 0x778 那一枪」正好相反。** 洗白自身就要调 `commit_creds`，
+  所以只能在**两个指针已经指向同一张页**时才发。在单字段落地之后做洗白，
+  等于把潜伏的分歧变成立即 panic。
+- 因此 `V12_LAUNDER=1` 是带门的：它把 `0x780` 视角（`getuid()`）与 `0x778` 视角
+  （`/proc/self/status` 的 `Uid:`）对比，**不一致就直接拒绝**。这个检查必要但不充分 ——
+  两个不同对象可以带相同 id —— 所以可靠配置仍然是「两个字段都写成同一张页」。
+  LT 报告行现在同时打印两个视角（`uid=` / `real_uid=` / `consistent=`），
+  让状态被**读到**而不是被推断。
+
+完整推导（含写形状重叠自查，离线已关闭：形状词在内核栈的 fd_set 网格里，
+而副作用落在喷页内，两者不可能重叠）：
+[`evidence/2026-09-18-cred-launder-verification.md`](evidence/2026-09-18-cred-launder-verification.md)。
 
 ## 检测路径
 
@@ -360,6 +411,21 @@ run.sh                    设备侧运行编排（跨重启重试）
 [`evidence/notes.md`](evidence/notes.md) —— 内核侧：模块地址与各 `/proc` 通道在哪种 SELinux
 状态下可用；`g_boot_state` 的完整推导（含 `strstr` 关键字）；更正后的豁免表；能补齐
 缺失的那半张击杀现场所需的抓取配方；以及仍未定论的清单。
+
+[`evidence/2026-09-18-bootA/`](evidence/2026-09-18-bootA/README.md) —— 现行设计的首次上机，13 次 boot。
+重启都是**有序**的（`bootreason=reboot`），也从未抓到 panic 行 —— **但请把它读成「样本 = 1」，不是 13。**
+四次重启里，两次存下来的 `klog.host` 是**空的**，一次存的是**下一个 boot** 的日志，
+只有一个窗口有可能覆盖到它自己的重启时刻。同样地，某一次的 `probe_state` 与受害者回读**都是空的**
+（设备当时已经掉了），所以它对「写有没有落地」**不携带任何信息** —— 空字段不等于「无变化」。
+该目录还记录了一个值得知道的方法学错误：**本机 `dmesg -w` 是空操作**（toybox dump 一次就退出），
+所以早先那次 run 的内核日志只含抓取前的历史 —— 「没有 `[ROOTCHECK-*]`」不构成任何证据。
+更正后的「host 侧轮询 + 增量落盘」配方在 `evidence/notes.md` §6。
+
+[`evidence/2026-09-18-cred-launder-verification.md`](evidence/2026-09-18-cred-launder-verification.md)
+—— 对 cred 洗白方案的核实，**依据是本镜像自己的反汇编**（不是通用 5.10 源码）：
+`commit_creds` 的双写、`prepare_creds` 的真分配与实测 `sizeof(struct cred) = 0xA8`、
+上面那条 `BUG_ON(cred != real_cred)` 分歧态、已关闭的写形状重叠自查，
+以及对 13 次 boot 的证据覆盖审计。
 
 [`artifacts/guard_post_handler.s`](artifacts/guard_post_handler.s) —— 重定位已填的击杀链。
 旧清单里的 `adrp x9, #0` 其实是 `.data..ro_after_init`，`bl #0x4ac` 是 `oplus_root_check_succ`。
